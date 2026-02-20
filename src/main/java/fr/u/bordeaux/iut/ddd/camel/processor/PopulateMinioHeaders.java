@@ -1,4 +1,4 @@
-package fr.u.bordeaux.iut.ddd;
+package fr.u.bordeaux.iut.ddd.camel.processor;
 
 import org.apache.camel.Exchange;
 import org.apache.camel.Processor;
@@ -7,7 +7,7 @@ import org.apache.camel.component.minio.MinioConstants;
 import java.security.MessageDigest;
 import java.util.Locale;
 
-class PopulateMinioHeaders implements Processor {
+public class PopulateMinioHeaders implements Processor {
     @Override
     public void process(Exchange exchange) throws Exception {
         String contentType = exchange.getMessage().getHeader(Exchange.CONTENT_TYPE, String.class);

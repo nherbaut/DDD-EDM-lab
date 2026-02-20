@@ -1,44 +1,16 @@
-package fr.u.bordeaux.iut.ddd;
+package fr.u.bordeaux.iut.ddd.camel.processor;
 
 import org.apache.camel.Exchange;
 import org.apache.camel.Processor;
-import org.apache.camel.spi.MimeType;
 
 import java.util.Locale;
 
-class GuardContentType implements Processor {
+public class GuardContentType implements Processor {
 
     private final String contentType;
 
     private GuardContentType(String contentType) {
         this.contentType = contentType;
-    }
-
-    enum MimeType {
-        JPG("image", "jpeg"),
-        PNG("image", "png"),
-        IMAGE("image", "");
-
-        private final String type;
-        private final String subType;
-
-        private MimeType(String type, String subType) {
-            this.type = type;
-            this.subType = subType;
-        }
-
-        public String getType() {
-            return this.type;
-        }
-
-        public String getSubType() {
-            return this.subType;
-        }
-
-        public String getMimeType() {
-            return this.type + "/" + this.subType;
-        }
-
     }
 
     public static GuardContentType gardMime(MimeType mimeType) {
@@ -54,7 +26,17 @@ class GuardContentType implements Processor {
             exchange.getMessage().setHeader(Exchange.CONTENT_TYPE, "text/plain");
             exchange.getMessage().setBody("Unsupported Media Type\n");
             exchange.setRouteStop(true);
+
             return;
+        } else {
+            String fileExtension = switch (contentType) {
+                case "image/jpeg" -> "jpg";
+                case "image/png" -> "png";
+                default -> "unknown";
+            };
+
+
+            exchange.getMessage().setHeader("fileExtension", fileExtension);
         }
     }
 }

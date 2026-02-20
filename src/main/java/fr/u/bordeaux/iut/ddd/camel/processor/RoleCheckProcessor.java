@@ -1,4 +1,4 @@
-package fr.u.bordeaux.iut.ddd;
+package fr.u.bordeaux.iut.ddd.camel.processor;
 
 import io.quarkus.security.identity.SecurityIdentity;
 import io.quarkus.vertx.http.runtime.security.QuarkusHttpUser;
@@ -6,7 +6,7 @@ import org.apache.camel.Exchange;
 import org.apache.camel.Message;
 import org.apache.camel.Processor;
 
-class RoleCheckProcessor implements Processor {
+public class RoleCheckProcessor implements Processor {
 
     private final String role;
 

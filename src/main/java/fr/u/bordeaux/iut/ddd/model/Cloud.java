@@ -33,6 +33,9 @@ public class Cloud {
     @Column(name = "prevent_further_processing", nullable = false)
     private boolean preventFurtherProcessing;
 
+    @Column(name = "deletion_requested", nullable = false)
+    private boolean deletionRequested;
+
     @ManyToOne(fetch = FetchType.LAZY, optional = false)
     @JoinColumn(name = "user_id", nullable = false)
     private User user;
@@ -47,6 +50,7 @@ public class Cloud {
         this.user = user;
         this.originalFileName = originalFileName;
         this.preventFurtherProcessing = false;
+        this.deletionRequested = false;
     }
 
     public Long getId() {
@@ -57,12 +61,24 @@ public class Cloud {
         return minioObjectName;
     }
 
+    public void setMinioObjectName(String minioObjectName) {
+        this.minioObjectName = minioObjectName;
+    }
+
     public String getMinioETag() {
         return minioETag;
     }
 
+    public void setMinioETag(String minioETag) {
+        this.minioETag = minioETag;
+    }
+
     public String getOriginalFileName() {
         return originalFileName;
+    }
+
+    public void setOriginalFileName(String originalFileName) {
+        this.originalFileName = originalFileName;
     }
 
     public User getUser() {
@@ -83,6 +99,14 @@ public class Cloud {
 
     public void setPreventFurtherProcessing(boolean preventFurtherProcessing) {
         this.preventFurtherProcessing = preventFurtherProcessing;
+    }
+
+    public boolean isDeletionRequested() {
+        return deletionRequested;
+    }
+
+    public void setDeletionRequested(boolean deletionRequested) {
+        this.deletionRequested = deletionRequested;
     }
 
 }

@@ -151,10 +151,22 @@
 
     const selectedCloudIds = new Set();
 
-    function getCloudOwnerId(cloud) {
-        const name = String(cloud.minioObjectName || "");
+    function extractDownloadTargetFromObjectName(objectName) {
+        const name = String(objectName || "");
         const parts = name.split("/");
-        return parts.length >= 3 ? parts[1] : "";
+        if (parts.length >= 4 && parts[0] === "uploads" && parts[1] === "clouds") {
+            return { userId: parts[2], fileName: parts.slice(3).join("/") };
+        }
+        if (parts.length >= 3 && parts[0] === "cloud") {
+            return { userId: parts[1], fileName: parts.slice(2).join("/") };
+        }
+        return null;
+    }
+
+    function getCloudOwnerId(cloud) {
+        if (cloud && cloud.downloadUserId) return String(cloud.downloadUserId);
+        const target = extractDownloadTargetFromObjectName(cloud ? cloud.minioObjectName : "");
+        return target ? String(target.userId || "") : "";
     }
 
     function userIdentityCandidates(user) {
@@ -202,11 +214,11 @@
             }
             grid.innerHTML = "";
             clouds.forEach((cloud) => {
-                const name = String(cloud.minioObjectName || "");
-                const parts = name.split("/");
-                if (parts.length < 3) return;
-                const userId = parts[1];
-                const fileName = parts.slice(2).join("/");
+                const name = String(cloud.downloadFileName || cloud.minioObjectName || "");
+                const target = (cloud && cloud.downloadUserId && cloud.downloadFileName)
+                    ? { userId: String(cloud.downloadUserId), fileName: String(cloud.downloadFileName) }
+                    : extractDownloadTargetFromObjectName(name);
+                if (!target || !target.userId || !target.fileName) return;
 
                 const col = document.createElement("div");
                 col.className = "col-6 col-md-4 col-lg-3";
@@ -240,7 +252,7 @@
                 img.className = "card-img-top rounded";
                 img.loading = "lazy";
                 img.alt = name;
-                img.src = "/cloud/" + encodeURIComponent(userId) + "/" + encodeURIComponent(fileName);
+                img.src = "/cloud/" + encodeURIComponent(target.userId) + "/" + encodeURIComponent(target.fileName);
                 img.style.cursor = "zoom-in";
                 img.addEventListener("click", () => openCloudModal(img.src, cloud.cloudName || name));
 
@@ -268,21 +280,75 @@
         let successCount = 0;
         let failCount = 0;
         for (const file of selectedFiles) {
-            statusNode.textContent = "Uploading " + file.name + "...";
-            const response = await fetch("/clouds", {
-                method: "POST",
-                headers: {
-                    "Content-Type": file.type || "application/octet-stream",
-                    "X-File-Name": file.name
-                },
-                body: file
-            });
-            if (response.ok) successCount += 1;
-            else failCount += 1;
+            statusNode.textContent = "Requesting upload link for " + file.name + "...";
+            try {
+                const uploadUrl = await requestUploadUrl(file);
+                statusNode.textContent = "Uploading " + file.name + "...";
+                const response = await fetch(uploadUrl, {
+                    method: "PUT",
+                    headers: {
+                        "Content-Type": file.type || "application/octet-stream"
+                    },
+                    body: file
+                });
+                if (!response.ok) throw new Error("Upload failed with HTTP " + response.status);
+                successCount += 1;
+            } catch (error) {
+                failCount += 1;
+                statusNode.textContent = "Upload failed for " + file.name + ": " + error.message;
+            }
         }
 
         statusNode.textContent = "Done: " + successCount + " uploaded, " + failCount + " failed.";
         await loadClouds();
+    }
+
+    async function requestUploadUrl(file) {
+        const response = await fetch("/clouds/upload-request", {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                "Accept": "text/event-stream"
+            },
+            body: JSON.stringify({
+                fileName: file.name,
+                contentType: file.type || "application/octet-stream"
+            })
+        });
+        if (!response.ok) {
+            const message = await response.text();
+            throw new Error("Upload link request failed (" + response.status + "): " + message.trim());
+        }
+        return await readUploadUrlFromSseResponse(response);
+    }
+
+    async function readUploadUrlFromSseResponse(response) {
+        if (!response.body) throw new Error("No SSE response body.");
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        while (true) {
+            const chunk = await reader.read();
+            if (chunk.done) break;
+            buffer += decoder.decode(chunk.value, { stream: true });
+            const events = buffer.split(/\r?\n\r?\n/);
+            buffer = events.pop() || "";
+            for (const eventBlock of events) {
+                const data = eventBlock
+                    .split(/\r?\n/)
+                    .filter((line) => line.startsWith("data:"))
+                    .map((line) => line.slice(5).trim())
+                    .join("\n");
+                if (!data) continue;
+                try {
+                    const parsed = JSON.parse(data);
+                    if (parsed && parsed.payload) return parsed.payload;
+                } catch (_) {
+                    if (data.startsWith("http://") || data.startsWith("https://")) return data;
+                }
+            }
+        }
+        throw new Error("No upload URL received from SSE stream.");
     }
 
     async function deleteSelectedClouds() {
