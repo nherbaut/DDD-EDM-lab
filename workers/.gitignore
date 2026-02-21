@@ -1,0 +1,35 @@
+# Python virtual environments
+.venv/
+venv/
+env/
+
+# Python bytecode / caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# Build / packaging
+build/
+dist/
+*.egg-info/
+pip-wheel-metadata/
+
+# Local runtime artifacts
+*.log
+*.pid
+.DS_Store
+
+# Model/cache artifacts that should stay local
+models/
+*.pt
+*.pth
+*.onnx
+*.safetensors
+
+# IDE/editor
+.idea/
+.vscode/
