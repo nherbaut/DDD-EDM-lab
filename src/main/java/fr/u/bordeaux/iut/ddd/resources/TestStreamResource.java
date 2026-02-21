@@ -2,7 +2,7 @@ package fr.u.bordeaux.iut.ddd.resources;
 
 import io.quarkus.security.identity.SecurityIdentity;
 import io.smallrye.mutiny.Multi;
-import jakarta.annotation.security.RolesAllowed;
+import io.quarkus.security.Authenticated;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.*;
 import jakarta.ws.rs.core.MediaType;
@@ -26,7 +26,7 @@ public class TestStreamResource {
     SecurityIdentity securityIdentity;
 
 
-    @RolesAllowed("viewer")
+    @Authenticated
     @POST
     @Path("/upload-request")
     @Consumes(MediaType.APPLICATION_JSON)
@@ -42,7 +42,7 @@ public class TestStreamResource {
         return stream;
     }
 
-    @RolesAllowed("viewer")
+    @Authenticated
     @GET
     @Path("/stream")
     @Produces(MediaType.SERVER_SENT_EVENTS)
