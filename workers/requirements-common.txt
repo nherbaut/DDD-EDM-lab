@@ -1,7 +1,8 @@
 --extra-index-url https://download.pytorch.org/whl/cpu
 
 torch==2.8.0+cpu
-torchvision==0.23.0+cpu
+torchvision==0.23.0+cpu ; platform_machine != "aarch64" and platform_machine != "arm64"
+torchvision==0.23.0 ; platform_machine == "aarch64" or platform_machine == "arm64"
 fastapi==0.116.1
 uvicorn[standard]==0.35.0
 numpy==1.26.4
