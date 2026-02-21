@@ -40,6 +40,20 @@ public class CloudClassificationRoutes extends EndpointRouteBuilder {
     @ConfigProperty(name = "GENERAL_CLASSIFICATION_THRESHOLD", defaultValue = "0.5")
     double generalClassificationThreshold;
 
+    @ConfigProperty(name = "cloudcatcher.classifier-minio-endpoint", defaultValue = "http://minio:9000")
+    String classifierMinioEndpoint;
+
+    @ConfigProperty(name = "cloudcatcher.classifier-minio-access-key", defaultValue = "adminadmin")
+    String classifierMinioAccessKey;
+
+    @ConfigProperty(name = "cloudcatcher.classifier-minio-secret-key", defaultValue = "adminadmin")
+    String classifierMinioSecretKey;
+
+    @ConfigProperty(name = "cloudcatcher.classifier-minio-region", defaultValue = "us-east-1")
+    String classifierMinioRegion;
+
+    private volatile MinioClient classifierMinioClient;
+
     @Override
     public void configure() {
         onException(Exception.class)
@@ -243,14 +257,7 @@ public class CloudClassificationRoutes extends EndpointRouteBuilder {
     }
 
     private String buildGeneralClassificationRequestPayload(Cloud cloud) throws Exception {
-        String imageUrl = minioClient.getPresignedObjectUrl(
-                GetPresignedObjectUrlArgs.builder()
-                        .method(Method.GET)
-                        .bucket("bucket")
-                        .object(cloud.getMinioObjectName())
-                        .expiry(60 * 60)
-                        .build()
-        );
+        String imageUrl = buildClassifierPresignedUrl(cloud.getMinioObjectName());
         Map<String, Object> request = new HashMap<>();
         request.put("documentType", "GeneralClassificationRequest");
         request.put("cloudId", cloud.getId());
@@ -262,14 +269,7 @@ public class CloudClassificationRoutes extends EndpointRouteBuilder {
     }
 
     private String buildCloudClassificationRequestPayload(Cloud cloud) throws Exception {
-        String imageUrl = minioClient.getPresignedObjectUrl(
-                GetPresignedObjectUrlArgs.builder()
-                        .method(Method.GET)
-                        .bucket("bucket")
-                        .object(cloud.getMinioObjectName())
-                        .expiry(60 * 60)
-                        .build()
-        );
+        String imageUrl = buildClassifierPresignedUrl(cloud.getMinioObjectName());
         Map<String, Object> request = new HashMap<>();
         request.put("documentType", "CloudClassificationRequest");
         request.put("cloudId", cloud.getId());
@@ -415,5 +415,33 @@ public class CloudClassificationRoutes extends EndpointRouteBuilder {
             return new String[]{userId, fileName};
         }
         return null;
+    }
+
+    private String buildClassifierPresignedUrl(String minioObjectName) throws Exception {
+        return classifierMinioClient().getPresignedObjectUrl(
+                GetPresignedObjectUrlArgs.builder()
+                        .method(Method.GET)
+                        .bucket("bucket")
+                        .object(minioObjectName)
+                        .region(classifierMinioRegion)
+                        .expiry(60 * 60)
+                        .build()
+        );
+    }
+
+    private MinioClient classifierMinioClient() {
+        MinioClient existing = classifierMinioClient;
+        if (existing != null) {
+            return existing;
+        }
+        synchronized (this) {
+            if (classifierMinioClient == null) {
+                classifierMinioClient = MinioClient.builder()
+                        .endpoint(classifierMinioEndpoint)
+                        .credentials(classifierMinioAccessKey, classifierMinioSecretKey)
+                        .build();
+            }
+            return classifierMinioClient;
+        }
     }
 }
