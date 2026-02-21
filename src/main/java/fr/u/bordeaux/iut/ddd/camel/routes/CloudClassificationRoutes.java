@@ -5,10 +5,13 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 
 import fr.u.bordeaux.iut.ddd.camel.processor.*;
 import fr.u.bordeaux.iut.ddd.model.Cloud;
+import fr.u.bordeaux.iut.ddd.model.GeneralClassificationDecision;
 import fr.u.bordeaux.iut.ddd.model.OutboxEvent;
 import fr.u.bordeaux.iut.ddd.model.User;
-import io.minio.GetObjectArgs;
+import fr.u.bordeaux.iut.ddd.resources.TestSseBridge;
+import io.minio.GetPresignedObjectUrlArgs;
 import io.minio.MinioClient;
+import io.minio.http.Method;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.apache.camel.Exchange;
@@ -17,42 +20,25 @@ import org.apache.camel.Processor;
 import org.apache.camel.builder.endpoint.EndpointRouteBuilder;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 
-import java.io.ByteArrayOutputStream;
-import java.io.InputStream;
-import java.net.URI;
-import java.net.URLEncoder;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
-import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.HashMap;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 
 @ApplicationScoped
 public class CloudClassificationRoutes extends EndpointRouteBuilder {
 
     @Inject
+    ObjectMapper objectMapper;
+
+    @Inject
     MinioClient minioClient;
 
     @Inject
-    ObjectMapper objectMapper;
-
-    @ConfigProperty(name = "cloudcatcher.public-base-url", defaultValue = "http://localhost:8080")
-    String publicBaseUrl;
-
-    @ConfigProperty(name = "cloudcatcher.classifier-fetch-token", defaultValue = "dev-classifier-token")
-    String classifierFetchToken;
-
-    @ConfigProperty(name = "GENERAL_CLASSIFICATION_URL", defaultValue = "http://localhost:8000/predict")
-    String generalClassificationUrl;
+    TestSseBridge testSseBridge;
 
     @ConfigProperty(name = "GENERAL_CLASSIFICATION_THRESHOLD", defaultValue = "0.5")
     double generalClassificationThreshold;
-
-    private final HttpClient httpClient = HttpClient.newHttpClient();
 
     @Override
     public void configure() {
@@ -63,29 +49,9 @@ public class CloudClassificationRoutes extends EndpointRouteBuilder {
                 .to(jpa(OutboxEvent.class.getCanonicalName()))
                 .log("Classification dispatch retry failed for outboxId=${exchangeProperty.cloudcatcher.outboxEventId}: ${exception.message}");
 
-        from(platformHttp("/clouds").httpMethodRestrict("POST"))
-                .process(RoleCheckProcessor.checkRole("viewer"))
-                .process(GuardContentType.gardMime(MimeType.IMAGE))
-                .process(new PopulateMinioHeaders())
-                .log("Received /clouds upload")
-                .to(minio("bucket").autoCreateBucket(true))
-                .to(direct("cloud-insert-db"))
-                .setHeader(Exchange.HTTP_RESPONSE_CODE, constant(202))
-                .setHeader(Exchange.CONTENT_TYPE, constant("text/plain"))
-                .setBody(constant("Upload accepted\n"));
 
-        from(direct("cloud-insert-db"))
-                .process(new PopulateJpaParametersForUserProcessor())
-                .to(jpa(User.class.getCanonicalName()).query("select u from User u where u.userName = :userName"))
-                .process(new TestForNewUserProcessor())
-                .choice()
-                .when(exchangeProperty("cloudcatcher.newUser").isEqualTo(true))
-                .to(jpa(User.class.getCanonicalName()).usePersist(true))
-                .end()
-                .process(new CreateNewCloudEntityProcessor())
-                .to(jpa(Cloud.class.getCanonicalName()).usePersist(true))
-                .process(new CreateClassificationOutboxEvent())
-                .to(jpa(OutboxEvent.class.getCanonicalName()).usePersist(true));
+
+
 
         from(timer("cloud-classification-dispatch").period(60000).delay(60000))
                 .to(jpa(OutboxEvent.class.getCanonicalName()).query("select e from OutboxEvent e where e.status = 'PENDING' order by e.createdAt"))
@@ -95,70 +61,50 @@ public class CloudClassificationRoutes extends EndpointRouteBuilder {
         from(direct("dispatch-classification-outbox-event"))
                 .process(new PrepareOutboxContext())
                 .process(new SetCloudLookupJpaParameters())
-                    .to(jpa(Cloud.class.getCanonicalName() + "?query=select c from Cloud c where c.id = :cloudId"))
-                .process(new ApplyGeneralClassificationContentFilter())
+                .to(jpa(Cloud.class.getCanonicalName() + "?query=select c from Cloud c where c.id = :cloudId"))
+                .process(new PrepareGeneralClassificationRequestMessage())
                 .choice()
-                .when(exchangeProperty("cloudcatcher.persistFilteredCloud").isEqualTo(true))
-                    .process(exchange -> exchange.getMessage().setBody(exchange.getProperty("cloudcatcher.cloudEntity", Cloud.class)))
-                    .to(jpa(Cloud.class.getCanonicalName()))
-                .end()
-                .choice()
-                .when(exchangeProperty("cloudcatcher.forwardToCloudClassification").isEqualTo(true))
-                .process(new PrepareOutboxDispatchMessage())
+                .when(exchangeProperty("cloudcatcher.forwardToGeneralClassification").isEqualTo(true))
                 .setExchangePattern(ExchangePattern.InOnly)
-                .to(springRabbitmq("cloud-classifier-exchange")
-                        .queues("cloud.classifier.requests")
-                        .disableReplyTo(true)
-                        .autoDeclareProducer(true)
-                        .routingKey("cloud.classify.requests"))
+                .to("spring-rabbitmq:cloud-classifier-exchange?routingKey=cloud.general.classifier.request&exchangeType=direct")
                 .end()
                 .process(new MarkOutboxEventSent())
                 .to(jpa(OutboxEvent.class.getCanonicalName()));
 
         from(springRabbitmq("cloud-classifier-exchange")
-                .queues("cloud.classifier.results")
-                .routingKey("cloud.classify.result")
+                .queues("cloud.general.classifier.results")
+                .routingKey("cloud.general.classifier.results")
+                .exchangeType("direct")
+                .autoDeclare(true))
+                .process(new ParseGeneralClassificationResult())
+                .to(jpa(Cloud.class.getCanonicalName()).query("select c from Cloud c left join fetch c.generalClassificationDecision where c.id = :cloudId"))
+                .process(new ApplyGeneralClassificationDecision())
+                .choice()
+                .when(exchangeProperty("cloudcatcher.persistGeneralClassificationDecision").isEqualTo(true))
+                .process(exchange -> exchange.getMessage().setBody(exchange.getProperty("cloudcatcher.cloudEntity", Cloud.class)))
+                .to(jpa(Cloud.class.getCanonicalName()))
+                .process(new EmitCloudUpsertStreamEvent())
+                .end()
+                .choice()
+                .when(exchangeProperty("cloudcatcher.forwardToCloudClassification").isEqualTo(true))
+                .process(new BuildCloudClassificationRequestFromCloud())
+                .setExchangePattern(ExchangePattern.InOnly)
+                .to("spring-rabbitmq:cloud-classifier-exchange?routingKey=cloud.cloud-classifier.request&exchangeType=direct")
+                .end();
+
+        from(springRabbitmq("cloud-classifier-exchange")
+                .queues("cloud.cloud-classifier.results")
+                .routingKey("cloud.cloud-classifier.results")
                 .exchangeType("direct")
                 .autoDeclare(true))
                 .process(new ApplyCloudClassificationResult())
                 .to(jpa(Cloud.class.getCanonicalName()).query("select c from Cloud c where c.id = :cloudId"))
                 .process(new UpdateCloudNameFromClassificationResult())
-                .to(jpa(Cloud.class.getCanonicalName()));
+                .to(jpa(Cloud.class.getCanonicalName()))
+                .process(new EmitCloudUpsertStreamEvent());
     }
 
-    private class CreateClassificationOutboxEvent implements Processor {
-        @Override
-        public void process(Exchange exchange) throws Exception {
-            Cloud cloud = exchange.getMessage().getBody(Cloud.class);
-            String token = URLEncoder.encode(classifierFetchToken, StandardCharsets.UTF_8);
-            String imageUrl = publicBaseUrl + "/clouddb/" + cloud.getId() + "?token=" + token;
-            Map<String, Object> classificationRequest = new HashMap<>();
-            classificationRequest.put("documentType", "CloudClassificationRequest");
-            classificationRequest.put("cloudId", cloud.getId());
-            classificationRequest.put("userName", cloud.getUser().getUserName());
-            classificationRequest.put("minioObjectName", cloud.getMinioObjectName());
-            classificationRequest.put("imageUrl", imageUrl);
-            classificationRequest.put("occurredAt", Instant.now().toString());
-            String payload = objectMapper.writeValueAsString(classificationRequest);
-            exchange.getMessage().setBody(new OutboxEvent("CloudClassificationRequested", cloud.getId(), payload));
-        }
-    }
 
-    private static class PrepareOutboxDispatchMessage implements Processor {
-        @Override
-        public void process(Exchange exchange) {
-            OutboxEvent event = exchange.getProperty("cloudcatcher.outboxEvent", OutboxEvent.class);
-            if (event == null) {
-                event = exchange.getMessage().getBody(OutboxEvent.class);
-                exchange.setProperty("cloudcatcher.outboxEvent", event);
-                exchange.setProperty("cloudcatcher.outboxEventId", event == null ? null : event.getId());
-            }
-            exchange.getMessage().setBody(event == null ? null : event.getPayload());
-            exchange.getMessage().setHeader(Exchange.CONTENT_TYPE, "application/json");
-            exchange.getMessage().setHeader("CamelSpringRabbitmqDeliveryMode", "PERSISTENT");
-            exchange.getMessage().setHeader("messageId", event == null ? null : String.valueOf(event.getId()));
-        }
-    }
 
     private static class PrepareOutboxContext implements Processor {
         @Override
@@ -166,8 +112,7 @@ public class CloudClassificationRoutes extends EndpointRouteBuilder {
             OutboxEvent event = exchange.getMessage().getBody(OutboxEvent.class);
             exchange.setProperty("cloudcatcher.outboxEvent", event);
             exchange.setProperty("cloudcatcher.outboxEventId", event == null ? null : event.getId());
-            exchange.setProperty("cloudcatcher.forwardToCloudClassification", true);
-            exchange.setProperty("cloudcatcher.persistFilteredCloud", false);
+            exchange.setProperty("cloudcatcher.forwardToGeneralClassification", true);
         }
     }
 
@@ -181,37 +126,86 @@ public class CloudClassificationRoutes extends EndpointRouteBuilder {
         }
     }
 
-    private class ApplyGeneralClassificationContentFilter implements Processor {
+    private class PrepareGeneralClassificationRequestMessage implements Processor {
         @Override
         public void process(Exchange exchange) throws Exception {
             List<Cloud> clouds = exchange.getMessage().getBody(List.class);
             if (clouds == null || clouds.isEmpty()) {
-                exchange.setProperty("cloudcatcher.forwardToCloudClassification", false);
+                exchange.setProperty("cloudcatcher.forwardToGeneralClassification", false);
                 return;
             }
 
             Cloud cloud = clouds.get(0);
-            exchange.setProperty("cloudcatcher.cloudEntity", cloud);
             if (cloud.isPreventFurtherProcessing()) {
-                exchange.setProperty("cloudcatcher.forwardToCloudClassification", false);
+                exchange.setProperty("cloudcatcher.forwardToGeneralClassification", false);
                 return;
             }
+            exchange.setProperty("cloudcatcher.forwardToGeneralClassification", true);
+            exchange.getMessage().setBody(buildGeneralClassificationRequestPayload(cloud));
+            exchange.getMessage().setHeader(Exchange.CONTENT_TYPE, "application/json");
+            exchange.getMessage().setHeader("CamelSpringRabbitmqDeliveryMode", "PERSISTENT");
+            exchange.getMessage().setHeader("messageId", "general-" + cloud.getId());
+        }
+    }
 
-            byte[] imageBytes;
-            try (InputStream inputStream = minioClient.getObject(GetObjectArgs.builder().bucket("bucket").object(cloud.getMinioObjectName()).build());
-                 ByteArrayOutputStream outputStream = new ByteArrayOutputStream()) {
-                inputStream.transferTo(outputStream);
-                imageBytes = outputStream.toByteArray();
-            }
+    private class ParseGeneralClassificationResult implements Processor {
+        @Override
+        public void process(Exchange exchange) throws Exception {
+            JsonNode doc = objectMapper.readTree(exchange.getMessage().getBody(String.class));
+            long cloudId = doc.path("cloudId").asLong();
+            Map<String, Object> jpaParams = new HashMap<>();
+            jpaParams.put("cloudId", cloudId);
+            exchange.getMessage().setHeader("CamelJpaParameters", jpaParams);
+            exchange.setProperty("cloudcatcher.generalClassificationResult", doc);
+        }
+    }
 
-            JsonNode classificationDoc = callGeneralClassification(imageBytes, contentTypeForObject(cloud.getMinioObjectName()));
-            if (matchesGeneralClassificationThreshold(classificationDoc, generalClassificationThreshold)) {
-                cloud.setPreventFurtherProcessing(true);
-                exchange.setProperty("cloudcatcher.persistFilteredCloud", true);
+    private class ApplyGeneralClassificationDecision implements Processor {
+        @Override
+        public void process(Exchange exchange) {
+            List<Cloud> clouds = exchange.getMessage().getBody(List.class);
+            if (clouds == null || clouds.isEmpty()) {
                 exchange.setProperty("cloudcatcher.forwardToCloudClassification", false);
-            } else {
-                exchange.setProperty("cloudcatcher.forwardToCloudClassification", true);
+                exchange.setProperty("cloudcatcher.persistGeneralClassificationDecision", false);
+                return;
             }
+            Cloud cloud = clouds.get(0);
+            JsonNode result = exchange.getProperty("cloudcatcher.generalClassificationResult", JsonNode.class);
+            boolean blocked = matchesGeneralClassificationThreshold(result, generalClassificationThreshold);
+            cloud.setPreventFurtherProcessing(blocked);
+            exchange.setProperty("cloudcatcher.cloudEntity", cloud);
+            exchange.setProperty("cloudcatcher.persistGeneralClassificationDecision", blocked);
+            exchange.setProperty("cloudcatcher.forwardToCloudClassification", !blocked);
+            if (blocked) {
+                String label = bestLabel(result);
+                double score = bestScore(result);
+                GeneralClassificationDecision decision = cloud.getGeneralClassificationDecision();
+                if (decision == null) {
+                    decision = new GeneralClassificationDecision(cloud, label, score);
+                } else {
+                    decision.setLabel(label);
+                    decision.setScore(score);
+                    decision.setDetectedAt(Instant.now());
+                    decision.setCloud(cloud);
+                }
+                cloud.setGeneralClassificationDecision(decision);
+                exchange.setProperty("cloudcatcher.generalClassificationDecisionEntity", decision);
+            }
+        }
+    }
+
+    private class BuildCloudClassificationRequestFromCloud implements Processor {
+        @Override
+        public void process(Exchange exchange) throws Exception {
+            Cloud cloud = exchange.getProperty("cloudcatcher.cloudEntity", Cloud.class);
+            if (cloud == null) {
+                exchange.setRouteStop(true);
+                return;
+            }
+            exchange.getMessage().setBody(buildCloudClassificationRequestPayload(cloud));
+            exchange.getMessage().setHeader(Exchange.CONTENT_TYPE, "application/json");
+            exchange.getMessage().setHeader("CamelSpringRabbitmqDeliveryMode", "PERSISTENT");
+            exchange.getMessage().setHeader("messageId", "cloud-" + cloud.getId());
         }
     }
 
@@ -248,25 +242,42 @@ public class CloudClassificationRoutes extends EndpointRouteBuilder {
         }
     }
 
-    private JsonNode callGeneralClassification(byte[] imageBytes, String contentType) throws Exception {
-        HttpRequest request = HttpRequest.newBuilder()
-                .uri(URI.create(generalClassificationUrl))
-                .header(Exchange.CONTENT_TYPE, contentType)
-                .POST(HttpRequest.BodyPublishers.ofByteArray(imageBytes))
-                .build();
-        HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-        if (response.statusCode() < 200 || response.statusCode() >= 300) {
-            throw new IllegalStateException("General classification HTTP " + response.statusCode() + ": " + response.body());
-        }
-        return objectMapper.readTree(response.body());
+    private String buildGeneralClassificationRequestPayload(Cloud cloud) throws Exception {
+        String imageUrl = minioClient.getPresignedObjectUrl(
+                GetPresignedObjectUrlArgs.builder()
+                        .method(Method.GET)
+                        .bucket("bucket")
+                        .object(cloud.getMinioObjectName())
+                        .expiry(60 * 60)
+                        .build()
+        );
+        Map<String, Object> request = new HashMap<>();
+        request.put("documentType", "GeneralClassificationRequest");
+        request.put("cloudId", cloud.getId());
+        request.put("userName", cloud.getUser().getUserName());
+        request.put("minioObjectName", cloud.getMinioObjectName());
+        request.put("imageUrl", imageUrl);
+        request.put("occurredAt", Instant.now().toString());
+        return objectMapper.writeValueAsString(request);
     }
 
-    private static String contentTypeForObject(String objectName) {
-        String lower = objectName == null ? "" : objectName.toLowerCase(Locale.ROOT);
-        if (lower.endsWith(".png")) {
-            return "image/png";
-        }
-        return "image/jpeg";
+    private String buildCloudClassificationRequestPayload(Cloud cloud) throws Exception {
+        String imageUrl = minioClient.getPresignedObjectUrl(
+                GetPresignedObjectUrlArgs.builder()
+                        .method(Method.GET)
+                        .bucket("bucket")
+                        .object(cloud.getMinioObjectName())
+                        .expiry(60 * 60)
+                        .build()
+        );
+        Map<String, Object> request = new HashMap<>();
+        request.put("documentType", "CloudClassificationRequest");
+        request.put("cloudId", cloud.getId());
+        request.put("userName", cloud.getUser().getUserName());
+        request.put("minioObjectName", cloud.getMinioObjectName());
+        request.put("imageUrl", imageUrl);
+        request.put("occurredAt", Instant.now().toString());
+        return objectMapper.writeValueAsString(request);
     }
 
     private static boolean matchesGeneralClassificationThreshold(JsonNode payload, double threshold) {
@@ -295,6 +306,44 @@ public class CloudClassificationRoutes extends EndpointRouteBuilder {
         return false;
     }
 
+    private static String bestLabel(JsonNode payload) {
+        if (payload == null || payload.isNull()) {
+            return "unknown";
+        }
+        JsonNode classification = payload.path("classification");
+        if (classification.isObject() && classification.path("label").isTextual()) {
+            return classification.path("label").asText("unknown");
+        }
+        JsonNode predictions = payload.path("predictions");
+        if (predictions.isArray() && predictions.size() > 0 && predictions.get(0).path("label").isTextual()) {
+            return predictions.get(0).path("label").asText("unknown");
+        }
+        JsonNode detections = payload.path("detections");
+        if (detections.isArray() && detections.size() > 0 && detections.get(0).path("label").isTextual()) {
+            return detections.get(0).path("label").asText("unknown");
+        }
+        return "unknown";
+    }
+
+    private static double bestScore(JsonNode payload) {
+        if (payload == null || payload.isNull()) {
+            return 0.0;
+        }
+        JsonNode classification = payload.path("classification");
+        if (classification.isObject()) {
+            return classification.path("score").asDouble(0.0);
+        }
+        JsonNode predictions = payload.path("predictions");
+        if (predictions.isArray() && predictions.size() > 0) {
+            return predictions.get(0).path("score").asDouble(0.0);
+        }
+        JsonNode detections = payload.path("detections");
+        if (detections.isArray() && detections.size() > 0) {
+            return detections.get(0).path("score").asDouble(0.0);
+        }
+        return 0.0;
+    }
+
     private static class MarkOutboxEventSent implements Processor {
         @Override
         public void process(Exchange exchange) {
@@ -319,5 +368,52 @@ public class CloudClassificationRoutes extends EndpointRouteBuilder {
             event.markFailure(message);
             exchange.getMessage().setBody(event);
         }
+    }
+
+    private class EmitCloudUpsertStreamEvent implements Processor {
+        @Override
+        public void process(Exchange exchange) throws Exception {
+            Cloud cloud = exchange.getMessage().getBody(Cloud.class);
+            if (cloud == null || cloud.getUser() == null) {
+                return;
+            }
+            Map<String, Object> cloudItem = new HashMap<>();
+            cloudItem.put("id", cloud.getId());
+            cloudItem.put("cloudName", cloud.getCloudName());
+            cloudItem.put("preventFurtherProcessing", cloud.isPreventFurtherProcessing());
+            if (cloud.getGeneralClassificationDecision() != null) {
+                cloudItem.put("deniedByLabel", cloud.getGeneralClassificationDecision().getLabel());
+                cloudItem.put("deniedByScore", cloud.getGeneralClassificationDecision().getScore());
+            }
+            String[] target = extractDownloadTargetFromMinioObjectName(cloud.getMinioObjectName());
+            if (target != null) {
+                cloudItem.put("downloadUserId", target[0]);
+                cloudItem.put("downloadFileName", target[1]);
+            }
+            String payload = objectMapper.writeValueAsString(Map.of(
+                    "type", "cloud-upserted",
+                    "cloud", cloudItem,
+                    "timestamp", Instant.now().toString()
+            ));
+            testSseBridge.emitIfConnected(cloud.getUser().getUserName(), payload);
+        }
+    }
+
+    private static String[] extractDownloadTargetFromMinioObjectName(String objectName) {
+        if (objectName == null || objectName.isBlank()) {
+            return null;
+        }
+        String[] parts = objectName.split("/");
+        if (parts.length >= 4 && "uploads".equals(parts[0]) && "clouds".equals(parts[1])) {
+            String userId = parts[2];
+            String fileName = String.join("/", java.util.Arrays.copyOfRange(parts, 3, parts.length));
+            return new String[]{userId, fileName};
+        }
+        if (parts.length >= 3 && "cloud".equals(parts[0])) {
+            String userId = parts[1];
+            String fileName = String.join("/", java.util.Arrays.copyOfRange(parts, 2, parts.length));
+            return new String[]{userId, fileName};
+        }
+        return null;
     }
 }

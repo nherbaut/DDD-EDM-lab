@@ -42,6 +42,16 @@ public class TestStreamResource {
         return stream;
     }
 
+    @RolesAllowed("viewer")
+    @GET
+    @Path("/stream")
+    @Produces(MediaType.SERVER_SENT_EVENTS)
+    @RestStreamElementType(MediaType.APPLICATION_JSON)
+    public Multi<String> stream() {
+        String userName = securityIdentity.getPrincipal() == null ? "anonymous" : securityIdentity.getPrincipal().getName();
+        return bridge.register(userName);
+    }
+
     private static String resolveFileExtension(Map<String, Object> payload) {
         if (payload != null) {
             Object fileNameValue = payload.get("fileName");

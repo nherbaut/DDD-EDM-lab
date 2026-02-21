@@ -12,11 +12,12 @@ from general_classifier_service import GeneralClassifierService
 
 RABBITMQ_URL = os.getenv("RABBITMQ_URL", "amqp://guest:guest@localhost:5672/%2F")
 EXCHANGE = os.getenv("RABBITMQ_EXCHANGE", "cloud-classifier-exchange")
-REQUEST_QUEUE = os.getenv("RABBITMQ_REQUEST_QUEUE", "cloud.classifier.requests")
-RESULT_QUEUE = os.getenv("RABBITMQ_RESULT_QUEUE", "cloud.classifier.results")
-RESULT_ROUTING_KEY = os.getenv("RABBITMQ_RESULT_ROUTING_KEY", "cloud.classify.result")
+REQUEST_QUEUE = os.getenv("RABBITMQ_REQUEST_QUEUE", "cloud.general.classifier.request")
+RESULT_QUEUE = os.getenv("RABBITMQ_RESULT_QUEUE", "cloud.general.classifier.results")
+RESULT_ROUTING_KEY = os.getenv("RABBITMQ_RESULT_ROUTING_KEY", "cloud.general.classifier.results")
+INVALID_ROUTING_KEY = os.getenv("RABBITMQ_INVALID_ROUTING_KEY", "cloud.general.classifier.invalid")
 RESULT_DOCUMENT_TYPE = os.getenv("RESULT_DOCUMENT_TYPE", "ObjectClassified")
-CLASSIFIER_FETCH_TOKEN = os.getenv("CLASSIFIER_FETCH_TOKEN", "dev-classifier-token")
+INVALID_DOCUMENT_TYPE = os.getenv("INVALID_DOCUMENT_TYPE", "InvalidClassificationRequest")
 CONNECT_RETRY_BASE_SECONDS = float(os.getenv("RABBITMQ_RETRY_BASE_SECONDS", "1.0"))
 CONNECT_RETRY_MAX_SECONDS = float(os.getenv("RABBITMQ_RETRY_MAX_SECONDS", "30.0"))
 
@@ -29,6 +30,10 @@ LOGGER = logging.getLogger("general-mq-worker")
 service = GeneralClassifierService()
 
 
+class NonRetryableMessageError(Exception):
+    pass
+
+
 def compute_backoff_seconds(attempt: int) -> float:
     exp = min(CONNECT_RETRY_MAX_SECONDS, CONNECT_RETRY_BASE_SECONDS * (2 ** max(0, attempt - 1)))
     jitter = random.uniform(0, min(1.0, exp * 0.2))
@@ -37,10 +42,35 @@ def compute_backoff_seconds(attempt: int) -> float:
 
 def normalize_image_url(image_url: str) -> str:
     parsed = urlparse(image_url)
-    path = parsed.path.replace("/cloud/event/", "/clouddb/")
-    query = dict(parse_qsl(parsed.query, keep_blank_values=True))
-    query.setdefault("token", CLASSIFIER_FETCH_TOKEN)
-    return urlunparse(parsed._replace(path=path, query=urlencode(query)))
+    query_items = [(k, v) for (k, v) in parse_qsl(parsed.query, keep_blank_values=True) if k != "token"]
+    return urlunparse(parsed._replace(query=urlencode(query_items)))
+
+
+def publish_invalid_document(
+    channel: pika.adapters.blocking_connection.BlockingChannel,
+    original_document: dict,
+    reason: str,
+    details: str,
+) -> None:
+    invalid_document = {
+        "documentType": INVALID_DOCUMENT_TYPE,
+        "cloudId": original_document.get("cloudId"),
+        "reason": reason,
+        "details": details,
+        "original": original_document,
+    }
+    channel.basic_publish(
+        exchange=EXCHANGE,
+        routing_key=INVALID_ROUTING_KEY,
+        body=json.dumps(invalid_document).encode("utf-8"),
+        properties=pika.BasicProperties(content_type="application/json", delivery_mode=2),
+    )
+    LOGGER.warning(
+        "Invalid message sent cloudId=%s routingKey=%s reason=%s",
+        invalid_document.get("cloudId"),
+        INVALID_ROUTING_KEY,
+        reason,
+    )
 
 
 def handle_request_document(channel: pika.adapters.blocking_connection.BlockingChannel, body: bytes) -> None:
@@ -50,7 +80,19 @@ def handle_request_document(channel: pika.adapters.blocking_connection.BlockingC
     LOGGER.info("Accepted request document cloudId=%s imageUrl=%s", cloud_id, image_url)
 
     image_response = requests.get(image_url, timeout=60)
-    image_response.raise_for_status()
+    try:
+        image_response.raise_for_status()
+    except requests.HTTPError as exc:
+        status_code = exc.response.status_code if exc.response is not None else None
+        if status_code == 404:
+            publish_invalid_document(
+                channel=channel,
+                original_document=document,
+                reason="IMAGE_NOT_FOUND",
+                details=f"Image URL returned HTTP 404: {image_url}",
+            )
+            raise NonRetryableMessageError("Image not found (404)") from exc
+        raise
     image_bytes = image_response.content
     image_content_type = (image_response.headers.get("content-type") or "image/jpeg").split(";")[0].strip().lower()
 
@@ -101,6 +143,9 @@ def main() -> None:
             def on_message(ch, method, _properties, body):
                 try:
                     handle_request_document(ch, body)
+                    ch.basic_ack(delivery_tag=method.delivery_tag)
+                except NonRetryableMessageError as exc:
+                    LOGGER.warning("Worker non-retryable error, message acked: %s", exc)
                     ch.basic_ack(delivery_tag=method.delivery_tag)
                 except Exception:
                     LOGGER.exception("Worker error, message requeued")

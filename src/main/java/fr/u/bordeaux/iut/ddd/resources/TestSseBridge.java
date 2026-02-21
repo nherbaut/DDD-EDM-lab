@@ -50,6 +50,18 @@ public class TestSseBridge {
         emitter.emit(payload);
     }
 
+    public void emitIfConnected(String key, String payload) {
+        StreamState state = streams.get(key);
+        if (state == null || state.completed) {
+            return;
+        }
+        MultiEmitter<? super String> emitter = state.emitter;
+        if (emitter == null) {
+            return;
+        }
+        emitter.emit(payload);
+    }
+
     public void complete(String correlationId) {
         StreamState state = streams.computeIfAbsent(correlationId, ignored -> new StreamState());
         state.completed = true;

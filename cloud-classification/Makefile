@@ -34,7 +34,12 @@ run-rest:
 	PYTHONUNBUFFERED=1 CUDA_VISIBLE_DEVICES="" MODEL_DIR=$(MODEL_DIR) PORT=$(PORT) $(PYTHON) clouds-classification-rest.py
 
 run-amqp:
-	PYTHONUNBUFFERED=1 CUDA_VISIBLE_DEVICES="" MODEL_DIR=$(MODEL_DIR) $(PYTHON) clouds-classification-amqp.py
+	PYTHONUNBUFFERED=1 CUDA_VISIBLE_DEVICES="" MODEL_DIR=$(MODEL_DIR) \
+	RABBITMQ_REQUEST_QUEUE=cloud.cloud-classifier.request \
+	RABBITMQ_REQUEST_ROUTING_KEY=cloud.cloud-classifier.request \
+	RABBITMQ_RESULT_QUEUE=cloud.cloud-classifier.results \
+	RABBITMQ_RESULT_ROUTING_KEY=cloud.cloud-classifier.results \
+	$(PYTHON) clouds-classification-amqp.py
 
 docker-build:
 	docker build -t $(IMAGE) .

@@ -28,7 +28,11 @@ run-rest:
 	PYTHONUNBUFFERED=1 CUDA_VISIBLE_DEVICES="" YOLO_MODEL=$(YOLO_MODEL) PORT=$(PORT) $(PYTHON) general-classification-rest.py
 
 run-amqp:
-	PYTHONUNBUFFERED=1 CUDA_VISIBLE_DEVICES="" YOLO_MODEL=$(YOLO_MODEL) $(PYTHON) general-classification-amqp.py
+	PYTHONUNBUFFERED=1 CUDA_VISIBLE_DEVICES="" YOLO_MODEL=$(YOLO_MODEL) \
+	RABBITMQ_REQUEST_QUEUE=cloud.general.classifier.request \
+	RABBITMQ_RESULT_QUEUE=cloud.general.classifier.results \
+	RABBITMQ_RESULT_ROUTING_KEY=cloud.general.classifier.results \
+	$(PYTHON) general-classification-amqp.py
 
 docker-build:
 	docker build -t $(IMAGE) .

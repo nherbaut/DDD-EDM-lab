@@ -3,12 +3,13 @@ package fr.u.bordeaux.iut.ddd.camel.routes;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
-import fr.u.bordeaux.iut.ddd.camel.processor.PopulateCloudDeleteJpaParams;
+import fr.u.bordeaux.iut.ddd.camel.processor.HardDeleteCloudEntityProcessor;
 import fr.u.bordeaux.iut.ddd.camel.processor.PopulateCloudLookupJpaParams;
 import fr.u.bordeaux.iut.ddd.camel.processor.PrepareHardDeleteForSoftDeletedCloudProcessor;
 
 import fr.u.bordeaux.iut.ddd.camel.processor.RoleCheckProcessor;
 import fr.u.bordeaux.iut.ddd.model.Cloud;
+import fr.u.bordeaux.iut.ddd.resources.TestSseBridge;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.apache.camel.Exchange;
@@ -19,14 +20,21 @@ import org.apache.camel.component.minio.MinioConstants;
 import org.apache.camel.model.dataformat.JsonLibrary;
 
 import java.util.HashMap;
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 
 @ApplicationScoped
-public class CloudDeletionRoutes extends EndpointRouteBuilder {
+public class CloudDeleteRoutes extends EndpointRouteBuilder {
 
     @Inject
     ObjectMapper objectMapper;
+
+    @Inject
+    TestSseBridge testSseBridge;
+
+    @Inject
+    HardDeleteCloudEntityProcessor hardDeleteCloudEntityProcessor;
 
     @Override
     public void configure() {
@@ -68,8 +76,8 @@ public class CloudDeletionRoutes extends EndpointRouteBuilder {
                 .to(jpa(Cloud.class.getCanonicalName()).query("select c from Cloud c where c.minioObjectName = :minioObjectName"))
                 .process(new PrepareHardDeleteForSoftDeletedCloudProcessor())
                 .log("minio remove event: hardDelete=${exchangeProperty.cloudcatcher.hardDeleteCloud}")
-                .process(new PopulateCloudDeleteJpaParams())
-                .to(jpa(Cloud.class.getCanonicalName()).useExecuteUpdate(true).query("delete from Cloud c where c.id = :cloudId"))
+                .process(new EmitCloudDeletedStreamEvent())
+                .process(hardDeleteCloudEntityProcessor)
                 .log("hard-deleted cloud row for key=${exchangeProperty.cloudcatcher.minioObjectName}")
                 .end();
 
@@ -175,5 +183,46 @@ public class CloudDeletionRoutes extends EndpointRouteBuilder {
             }
             exchange.getMessage().setHeader(MinioConstants.OBJECT_NAME, objectName);
         }
+    }
+
+    private class EmitCloudDeletedStreamEvent implements Processor {
+        @Override
+        public void process(Exchange exchange) throws Exception {
+            Cloud cloud = exchange.getProperty("cloudcatcher.cloudToHardDelete", Cloud.class);
+            if (cloud == null || cloud.getUser() == null) {
+                return;
+            }
+            Map<String, Object> cloudItem = new HashMap<>();
+            cloudItem.put("id", cloud.getId());
+            String[] target = extractDownloadTargetFromMinioObjectName(cloud.getMinioObjectName());
+            if (target != null) {
+                cloudItem.put("downloadUserId", target[0]);
+                cloudItem.put("downloadFileName", target[1]);
+            }
+            String payload = objectMapper.writeValueAsString(Map.of(
+                    "type", "cloud-deleted",
+                    "cloud", cloudItem,
+                    "timestamp", Instant.now().toString()
+            ));
+            testSseBridge.emitIfConnected(cloud.getUser().getUserName(), payload);
+        }
+    }
+
+    private static String[] extractDownloadTargetFromMinioObjectName(String objectName) {
+        if (objectName == null || objectName.isBlank()) {
+            return null;
+        }
+        String[] parts = objectName.split("/");
+        if (parts.length >= 4 && "uploads".equals(parts[0]) && "clouds".equals(parts[1])) {
+            String userId = parts[2];
+            String fileName = String.join("/", java.util.Arrays.copyOfRange(parts, 3, parts.length));
+            return new String[]{userId, fileName};
+        }
+        if (parts.length >= 3 && "cloud".equals(parts[0])) {
+            String userId = parts[1];
+            String fileName = String.join("/", java.util.Arrays.copyOfRange(parts, 2, parts.length));
+            return new String[]{userId, fileName};
+        }
+        return null;
     }
 }

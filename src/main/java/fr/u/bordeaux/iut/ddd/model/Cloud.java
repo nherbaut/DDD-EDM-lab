@@ -1,6 +1,7 @@
 package fr.u.bordeaux.iut.ddd.model;
 
 import jakarta.persistence.Column;
+import jakarta.persistence.CascadeType;
 import jakarta.persistence.Entity;
 import jakarta.persistence.FetchType;
 import jakarta.persistence.GeneratedValue;
@@ -8,6 +9,7 @@ import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
 import jakarta.persistence.JoinColumn;
 import jakarta.persistence.ManyToOne;
+import jakarta.persistence.OneToOne;
 import jakarta.persistence.Table;
 
 @Entity
@@ -39,6 +41,9 @@ public class Cloud {
     @ManyToOne(fetch = FetchType.LAZY, optional = false)
     @JoinColumn(name = "user_id", nullable = false)
     private User user;
+
+    @OneToOne(mappedBy = "cloud", orphanRemoval = true, cascade = CascadeType.ALL)
+    private GeneralClassificationDecision generalClassificationDecision;
 
     protected Cloud() {
         // JPA
@@ -107,6 +112,17 @@ public class Cloud {
 
     public void setDeletionRequested(boolean deletionRequested) {
         this.deletionRequested = deletionRequested;
+    }
+
+    public GeneralClassificationDecision getGeneralClassificationDecision() {
+        return generalClassificationDecision;
+    }
+
+    public void setGeneralClassificationDecision(GeneralClassificationDecision generalClassificationDecision) {
+        this.generalClassificationDecision = generalClassificationDecision;
+        if (generalClassificationDecision != null && generalClassificationDecision.getCloud() != this) {
+            generalClassificationDecision.setCloud(this);
+        }
     }
 
 }

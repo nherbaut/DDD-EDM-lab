@@ -12,12 +12,13 @@ import requests
 
 RABBITMQ_URL = os.getenv("RABBITMQ_URL", "amqp://guest:guest@localhost:5672/%2F")
 EXCHANGE = os.getenv("RABBITMQ_EXCHANGE", "cloud-classifier-exchange")
-REQUEST_QUEUE = os.getenv("RABBITMQ_REQUEST_QUEUE", "cloud.classifier.requests")
-REQUEST_ROUTING_KEY = os.getenv("RABBITMQ_REQUEST_ROUTING_KEY", "cloud.classify.requests")
-RESULT_QUEUE = os.getenv("RABBITMQ_RESULT_QUEUE", "cloud.classifier.results")
-RESULT_ROUTING_KEY = os.getenv("RABBITMQ_RESULT_ROUTING_KEY", "cloud.classify.result")
+REQUEST_QUEUE = os.getenv("RABBITMQ_REQUEST_QUEUE", "cloud.cloud-classifier.request")
+REQUEST_ROUTING_KEY = os.getenv("RABBITMQ_REQUEST_ROUTING_KEY", "cloud.cloud-classifier.request")
+RESULT_QUEUE = os.getenv("RABBITMQ_RESULT_QUEUE", "cloud.cloud-classifier.results")
+RESULT_ROUTING_KEY = os.getenv("RABBITMQ_RESULT_ROUTING_KEY", "cloud.cloud-classifier.results")
+INVALID_ROUTING_KEY = os.getenv("RABBITMQ_INVALID_ROUTING_KEY", "cloud.cloud-classifier.invalid")
+INVALID_DOCUMENT_TYPE = os.getenv("INVALID_DOCUMENT_TYPE", "InvalidClassificationRequest")
 CLASSIFIER_URL = os.getenv("CLASSIFIER_URL", "http://localhost:8000/predict")
-CLASSIFIER_FETCH_TOKEN = os.getenv("CLASSIFIER_FETCH_TOKEN", "dev-classifier-token")
 CONNECT_RETRY_BASE_SECONDS = float(os.getenv("RABBITMQ_RETRY_BASE_SECONDS", "1.0"))
 CONNECT_RETRY_MAX_SECONDS = float(os.getenv("RABBITMQ_RETRY_MAX_SECONDS", "30.0"))
 
@@ -26,6 +27,10 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s [mq-worker] %(message)s",
 )
 LOGGER = logging.getLogger("mq-worker")
+
+
+class NonRetryableMessageError(Exception):
+    pass
 
 
 def compute_backoff_seconds(attempt: int) -> float:
@@ -50,10 +55,30 @@ def classify_image(image_bytes: bytes) -> dict[str, Any]:
 
 def normalize_image_url(image_url: str) -> str:
     parsed = urlparse(image_url)
-    path = parsed.path.replace("/cloud/event/", "/clouddb/")
-    query = dict(parse_qsl(parsed.query, keep_blank_values=True))
-    query.setdefault("token", CLASSIFIER_FETCH_TOKEN)
-    return urlunparse(parsed._replace(path=path, query=urlencode(query)))
+    query_items = [(k, v) for (k, v) in parse_qsl(parsed.query, keep_blank_values=True) if k != "token"]
+    return urlunparse(parsed._replace(path=parsed.path, query=urlencode(query_items)))
+
+
+def publish_invalid_document(channel, original_document: dict, reason: str, details: str) -> None:
+    invalid_document = {
+        "documentType": INVALID_DOCUMENT_TYPE,
+        "cloudId": original_document.get("cloudId"),
+        "reason": reason,
+        "details": details,
+        "original": original_document,
+    }
+    channel.basic_publish(
+        exchange=EXCHANGE,
+        routing_key=INVALID_ROUTING_KEY,
+        body=json.dumps(invalid_document).encode("utf-8"),
+        properties=pika.BasicProperties(content_type="application/json", delivery_mode=2),
+    )
+    LOGGER.warning(
+        "Invalid message sent cloudId=%s routingKey=%s reason=%s",
+        invalid_document.get("cloudId"),
+        INVALID_ROUTING_KEY,
+        reason,
+    )
 
 
 def handle_request_document(channel, body: bytes) -> None:
@@ -64,7 +89,19 @@ def handle_request_document(channel, body: bytes) -> None:
 
     LOGGER.info("Downloading cloud image for cloudId=%s", cloud_id)
     image_response = requests.get(image_url, timeout=60)
-    image_response.raise_for_status()
+    try:
+        image_response.raise_for_status()
+    except requests.HTTPError as exc:
+        status_code = exc.response.status_code if exc.response is not None else None
+        if status_code == 404:
+            publish_invalid_document(
+                channel=channel,
+                original_document=document,
+                reason="IMAGE_NOT_FOUND",
+                details=f"Image URL returned HTTP 404: {image_url}",
+            )
+            raise NonRetryableMessageError("Image not found (404)") from exc
+        raise
     LOGGER.info(
         "Cloud image received for cloudId=%s (%s bytes)",
         cloud_id,
@@ -128,6 +165,10 @@ def main() -> None:
                 LOGGER.info("Message received deliveryTag=%s", method.delivery_tag)
                 try:
                     handle_request_document(ch, body)
+                    ch.basic_ack(delivery_tag=method.delivery_tag)
+                    LOGGER.info("Message acked deliveryTag=%s", method.delivery_tag)
+                except NonRetryableMessageError as exc:
+                    LOGGER.warning("Worker non-retryable error, message acked: %s", exc)
                     ch.basic_ack(delivery_tag=method.delivery_tag)
                     LOGGER.info("Message acked deliveryTag=%s", method.delivery_tag)
                 except Exception as exc:

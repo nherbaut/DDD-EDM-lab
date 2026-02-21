@@ -122,6 +122,8 @@
 
 <script>
     let currentUser = null;
+    let cloudStream = null;
+    const cloudState = new Map();
 
     async function loadUser() {
         const payloadNode = document.getElementById("payload");
@@ -198,6 +200,132 @@
         }
     }
 
+    function badgeLabelForCloud(cloud) {
+        if (cloud && cloud.preventFurtherProcessing === true) {
+            const label = String(cloud.deniedByLabel || "").trim();
+            if (label) return "denied: reason " + label + " detected";
+            return "denied";
+        }
+        return cloud && cloud.cloudName ? cloud.cloudName : "pending";
+    }
+
+    function badgeClassForCloud(cloud) {
+        if (cloud && cloud.preventFurtherProcessing === true) {
+            return "bg-danger";
+        }
+        if (cloud && cloud.cloudName) {
+            return "bg-primary";
+        }
+        return "bg-secondary";
+    }
+
+    function cloudKey(cloud) {
+        if (!cloud) return null;
+        if (cloud.id !== undefined && cloud.id !== null) return "id:" + Number(cloud.id);
+        const userId = String(cloud.downloadUserId || "").trim();
+        const fileName = String(cloud.downloadFileName || "").trim();
+        if (userId && fileName) return "file:" + userId + "/" + fileName;
+        if (cloud.minioObjectName) return "minio:" + String(cloud.minioObjectName);
+        return null;
+    }
+
+    function upsertCloudState(cloud) {
+        const key = cloudKey(cloud);
+        if (!key) return;
+        cloudState.set(key, cloud);
+    }
+
+    function removeCloudState(cloud) {
+        const key = cloudKey(cloud);
+        if (!key) return;
+        const previous = cloudState.get(key);
+        if (previous && previous.id !== undefined && previous.id !== null) {
+            selectedCloudIds.delete(Number(previous.id));
+        } else if (cloud.id !== undefined && cloud.id !== null) {
+            selectedCloudIds.delete(Number(cloud.id));
+        }
+        cloudState.delete(key);
+    }
+
+    function replaceCloudState(clouds) {
+        cloudState.clear();
+        clouds.forEach((cloud) => upsertCloudState(cloud));
+    }
+
+    function renderCloudsFromState() {
+        const grid = document.getElementById("thumb-grid");
+        const clouds = Array.from(cloudState.values());
+        const userClouds = cloudEntitiesForCurrentUser(clouds);
+        document.getElementById("cloud-payload").textContent = JSON.stringify(userClouds, null, 2);
+
+        const validIds = new Set(
+            userClouds
+                .filter((cloud) => cloud.id !== undefined && cloud.id !== null)
+                .map((cloud) => Number(cloud.id))
+        );
+        Array.from(selectedCloudIds).forEach((id) => {
+            if (!validIds.has(id)) selectedCloudIds.delete(id);
+        });
+
+        if (userClouds.length === 0) {
+            grid.innerHTML = '<div class="col-12 text-muted">No uploaded clouds yet.</div>';
+            refreshDeleteBar();
+            return;
+        }
+
+        grid.innerHTML = "";
+        userClouds.forEach((cloud) => {
+            const name = String(cloud.downloadFileName || cloud.minioObjectName || "");
+            const target = (cloud && cloud.downloadUserId && cloud.downloadFileName)
+                ? { userId: String(cloud.downloadUserId), fileName: String(cloud.downloadFileName) }
+                : extractDownloadTargetFromObjectName(name);
+            if (!target || !target.userId || !target.fileName) return;
+
+            const col = document.createElement("div");
+            col.className = "col-6 col-md-4 col-lg-3";
+
+            const card = document.createElement("div");
+            card.className = "card thumb-card shadow-sm border-0";
+
+            const badge = document.createElement("span");
+            badge.className = "position-absolute top-0 start-0 translate-middle-y badge rounded-pill " + badgeClassForCloud(cloud) + " ms-3 mt-2";
+            badge.textContent = badgeLabelForCloud(cloud);
+
+            const checkboxWrap = document.createElement("div");
+            checkboxWrap.className = "thumb-check form-check";
+            const checkbox = document.createElement("input");
+            checkbox.className = "form-check-input";
+            checkbox.type = "checkbox";
+            checkbox.checked = cloud.id != null && selectedCloudIds.has(Number(cloud.id));
+            checkbox.disabled = cloud.id == null;
+            checkbox.title = cloud.id == null ? "Missing cloud id" : "Select for deletion";
+            checkbox.addEventListener("click", (event) => event.stopPropagation());
+            checkbox.addEventListener("change", () => {
+                if (cloud.id == null) return;
+                const id = Number(cloud.id);
+                if (checkbox.checked) selectedCloudIds.add(id);
+                else selectedCloudIds.delete(id);
+                refreshDeleteBar();
+            });
+            checkboxWrap.appendChild(checkbox);
+
+            const img = document.createElement("img");
+            img.className = "card-img-top rounded";
+            img.loading = "lazy";
+            img.alt = name;
+            img.src = "/cloud/" + encodeURIComponent(target.userId) + "/" + encodeURIComponent(target.fileName);
+            img.style.cursor = "zoom-in";
+            img.addEventListener("click", () => openCloudModal(img.src, cloud.cloudName || name));
+
+            card.appendChild(badge);
+            card.appendChild(checkboxWrap);
+            card.appendChild(img);
+            col.appendChild(card);
+            grid.appendChild(col);
+        });
+        refreshDeleteBar();
+    }
+
     async function loadClouds() {
         const grid = document.getElementById("thumb-grid");
         grid.innerHTML = '<div class="col-12 text-muted">Loading...</div>';
@@ -206,63 +334,8 @@
             if (!response.ok) throw new Error("HTTP " + response.status);
             const payload = await response.json();
             const clouds = toCloudItems(payload);
-            const userClouds = cloudEntitiesForCurrentUser(clouds);
-            document.getElementById("cloud-payload").textContent = JSON.stringify(userClouds, null, 2);
-            if (clouds.length === 0) {
-                grid.innerHTML = '<div class="col-12 text-muted">No uploaded clouds yet.</div>';
-                return;
-            }
-            grid.innerHTML = "";
-            clouds.forEach((cloud) => {
-                const name = String(cloud.downloadFileName || cloud.minioObjectName || "");
-                const target = (cloud && cloud.downloadUserId && cloud.downloadFileName)
-                    ? { userId: String(cloud.downloadUserId), fileName: String(cloud.downloadFileName) }
-                    : extractDownloadTargetFromObjectName(name);
-                if (!target || !target.userId || !target.fileName) return;
-
-                const col = document.createElement("div");
-                col.className = "col-6 col-md-4 col-lg-3";
-
-                const card = document.createElement("div");
-                card.className = "card thumb-card shadow-sm border-0";
-
-                const badge = document.createElement("span");
-                badge.className = "position-absolute top-0 start-0 translate-middle-y badge rounded-pill bg-primary ms-3 mt-2";
-                badge.textContent = cloud.cloudName || "pending";
-
-                const checkboxWrap = document.createElement("div");
-                checkboxWrap.className = "thumb-check form-check";
-                const checkbox = document.createElement("input");
-                checkbox.className = "form-check-input";
-                checkbox.type = "checkbox";
-                checkbox.checked = cloud.id != null && selectedCloudIds.has(Number(cloud.id));
-                checkbox.disabled = cloud.id == null;
-                checkbox.title = cloud.id == null ? "Missing cloud id" : "Select for deletion";
-                checkbox.addEventListener("click", (event) => event.stopPropagation());
-                checkbox.addEventListener("change", () => {
-                    if (cloud.id == null) return;
-                    const id = Number(cloud.id);
-                    if (checkbox.checked) selectedCloudIds.add(id);
-                    else selectedCloudIds.delete(id);
-                    refreshDeleteBar();
-                });
-                checkboxWrap.appendChild(checkbox);
-
-                const img = document.createElement("img");
-                img.className = "card-img-top rounded";
-                img.loading = "lazy";
-                img.alt = name;
-                img.src = "/cloud/" + encodeURIComponent(target.userId) + "/" + encodeURIComponent(target.fileName);
-                img.style.cursor = "zoom-in";
-                img.addEventListener("click", () => openCloudModal(img.src, cloud.cloudName || name));
-
-                card.appendChild(badge);
-                card.appendChild(checkboxWrap);
-                card.appendChild(img);
-                col.appendChild(card);
-                grid.appendChild(col);
-            });
-            refreshDeleteBar();
+            replaceCloudState(clouds);
+            renderCloudsFromState();
         } catch (error) {
             document.getElementById("cloud-payload").textContent = "[]";
             grid.innerHTML = '<div class="col-12 text-danger">Unable to load thumbnails: ' + error.message + '</div>';
@@ -397,7 +470,32 @@
 
     async function initPage() {
         await loadUser();
+        connectCloudStream();
         await loadClouds();
+    }
+
+    function connectCloudStream() {
+        if (cloudStream) {
+            cloudStream.close();
+        }
+        cloudStream = new EventSource("/clouds/stream");
+        cloudStream.onmessage = (event) => {
+            if (!event || !event.data) return;
+            try {
+                const payload = JSON.parse(event.data);
+                if (payload && payload.type === "cloud-upserted" && payload.cloud) {
+                    upsertCloudState(payload.cloud);
+                    renderCloudsFromState();
+                } else if (payload && payload.type === "cloud-deleted" && payload.cloud) {
+                    removeCloudState(payload.cloud);
+                    renderCloudsFromState();
+                }
+            } catch (_) {
+            }
+        };
+        cloudStream.onerror = () => {
+            // Browser auto-reconnects EventSource. Keep silent to avoid noisy UI.
+        };
     }
 
     initPage();
