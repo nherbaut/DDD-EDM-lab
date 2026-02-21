@@ -18,6 +18,7 @@ import org.apache.camel.Processor;
 import org.apache.camel.builder.endpoint.EndpointRouteBuilder;
 import org.apache.camel.component.minio.MinioConstants;
 import org.apache.camel.model.dataformat.JsonLibrary;
+import org.jboss.logging.Logger;
 
 import java.util.HashMap;
 import java.time.Instant;
@@ -26,6 +27,7 @@ import java.util.Map;
 
 @ApplicationScoped
 public class CloudDeleteRoutes extends EndpointRouteBuilder {
+    private static final Logger LOG = Logger.getLogger(CloudDeleteRoutes.class);
 
     @Inject
     ObjectMapper objectMapper;
@@ -68,17 +70,21 @@ public class CloudDeleteRoutes extends EndpointRouteBuilder {
                 .exchangeType("direct")
                 .autoDeclare(true))
                 .process(new ParseCloudDeleteRequestMessage())
-                .log("minio deletion requested: ${body}")
+                .process(exchange -> LOG.infof("minio deletion requested: %s", exchange.getMessage().getBody(String.class)))
                 .to(minio("bucket").operation("deleteObject"));
 
         from(direct("handle-minio-object-removed"))
                 .process(new PopulateCloudLookupJpaParams())
                 .to(jpa(Cloud.class.getCanonicalName()).query("select c from Cloud c where c.minioObjectName = :minioObjectName"))
                 .process(new PrepareHardDeleteForSoftDeletedCloudProcessor())
-                .log("minio remove event: hardDelete=${exchangeProperty.cloudcatcher.hardDeleteCloud}")
+                .process(exchange -> LOG.infof(
+                        "minio remove event: hardDelete=%s",
+                        exchange.getProperty("cloudcatcher.hardDeleteCloud", Boolean.class)))
                 .process(new EmitCloudDeletedStreamEvent())
                 .process(hardDeleteCloudEntityProcessor)
-                .log("hard-deleted cloud row for key=${exchangeProperty.cloudcatcher.minioObjectName}")
+                .process(exchange -> LOG.infof(
+                        "hard-deleted cloud row for key=%s",
+                        exchange.getProperty("cloudcatcher.minioObjectName", String.class)))
                 .end();
 
     }

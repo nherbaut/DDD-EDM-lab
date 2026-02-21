@@ -19,6 +19,7 @@ import org.apache.camel.ExchangePattern;
 import org.apache.camel.Processor;
 import org.apache.camel.builder.endpoint.EndpointRouteBuilder;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
+import org.jboss.logging.Logger;
 
 import java.time.Instant;
 import java.util.HashMap;
@@ -27,6 +28,7 @@ import java.util.Map;
 
 @ApplicationScoped
 public class CloudClassificationRoutes extends EndpointRouteBuilder {
+    private static final Logger LOG = Logger.getLogger(CloudClassificationRoutes.class);
 
     @Inject
     ObjectMapper objectMapper;
@@ -61,7 +63,12 @@ public class CloudClassificationRoutes extends EndpointRouteBuilder {
                 .handled(true)
                 .process(new MarkOutboxEventFailure())
                 .to(jpa(OutboxEvent.class.getCanonicalName()))
-                .log("Classification dispatch retry failed for outboxId=${exchangeProperty.cloudcatcher.outboxEventId}: ${exception.message}");
+                .process(exchange -> {
+                    Object outboxId = exchange.getProperty("cloudcatcher.outboxEventId");
+                    Throwable exception = exchange.getException();
+                    LOG.errorf("Classification dispatch retry failed for outboxId=%s: %s",
+                            outboxId, exception == null ? "unknown" : exception.getMessage());
+                });
 
 
 

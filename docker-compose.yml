@@ -25,6 +25,8 @@ services:
     environment:
       KEYCLOAK_ADMIN: admin
       KEYCLOAK_ADMIN_PASSWORD: admin
+      KC_HOSTNAME: http://localhost:8081
+      KC_HOSTNAME_STRICT: "false"
     volumes:
       - ./src/main/resources/realm-export.json:/opt/keycloak/data/import/realm-export.json:ro
     healthcheck:
@@ -51,7 +53,7 @@ services:
   minio:
     image: docker.io/minio/minio:RELEASE.2025-04-22T22-12-26Z
     container_name: minio
-    command: server /data --console-address ":9001"
+    command: ["server", "/data", "--console-address", ":9001"]
     ports:
       - "9000:9000"
       - "9001:9001"
@@ -71,7 +73,7 @@ services:
 
   general-classifier-worker:
     container_name: general-classifier-worker
-    image: nherbaut/ddd-worker-classifier-general:latest
+    image: ${GENERAL_WORKER_IMAGE:-nherbaut/ddd-worker-classifier-general:latest}
     command: ["python3", "general-classification-amqp.py"]
     environment:
       RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/%2F
@@ -89,7 +91,7 @@ services:
 
   cloud-classifier-worker:
     container_name: cloud-classifier-worker
-    image: nherbaut/ddd-worker-classifier-cloud:latest
+    image: ${CLOUD_WORKER_IMAGE:-nherbaut/ddd-worker-classifier-cloud:latest}
     command: ["python3", "clouds-classification-amqp.py"]
     environment:
       RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/%2F
@@ -104,3 +106,42 @@ services:
     depends_on:
       rabbitmq:
         condition: service_healthy
+
+  backend:
+    container_name: ddd-backend
+    image: ${BACKEND_IMAGE:-ddd-backend:local}
+    pull_policy: never
+    ports:
+      - "8080:8080"
+    environment:
+      QUARKUS_HTTP_HOST: 0.0.0.0
+      QUARKUS_DATASOURCE_JDBC_URL: jdbc:postgresql://postgres:5432/app
+      QUARKUS_DATASOURCE_USERNAME: app
+      QUARKUS_DATASOURCE_PASSWORD: app
+      CLOUDCATCHER_KEYCLOAK_REALM: cloudcatcher
+      CLOUDCATCHER_KEYCLOAK_PUBLIC_HOST: localhost
+      CLOUDCATCHER_KEYCLOAK_PUBLIC_PORT: "8081"
+      CLOUDCATCHER_KEYCLOAK_INTERNAL_HOST: keycloak
+      CLOUDCATCHER_KEYCLOAK_INTERNAL_PORT: "8080"
+      QUARKUS_MINIO_HOST: minio
+      QUARKUS_MINIO_PORT: "9000"
+      QUARKUS_MINIO_ACCESS_KEY: adminadmin
+      QUARKUS_MINIO_SECRET_KEY: adminadmin
+      QUARKUS_MINIO_SECURE: "false"
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: "5672"
+      RABBITMQ_USERNAME: guest
+      RABBITMQ_PASSWORD: guest
+      CLOUDCATCHER_CLASSIFIER_MINIO_ENDPOINT: http://minio:9000
+      CLOUDCATCHER_CLASSIFIER_MINIO_ACCESS_KEY: adminadmin
+      CLOUDCATCHER_CLASSIFIER_MINIO_SECRET_KEY: adminadmin
+      CLOUDCATCHER_CLASSIFIER_MINIO_REGION: us-east-1
+    depends_on:
+      postgres:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      minio:
+        condition: service_started

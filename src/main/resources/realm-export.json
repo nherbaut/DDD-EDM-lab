@@ -740,6 +740,9 @@
       "nodeReRegistrationTimeout": -1,
       "defaultClientScopes": [
         "service_account",
+        "roles",
+        "profile",
+        "email",
         "microprofile-jwt",
         "basic"
       ],

@@ -17,20 +17,22 @@ import org.apache.camel.Exchange;
 import org.apache.camel.Processor;
 import org.apache.camel.builder.endpoint.EndpointRouteBuilder;
 import org.apache.camel.component.minio.MinioConstants;
-import org.apache.camel.component.minio.MinioOperations;
 import org.apache.camel.model.dataformat.JsonLibrary;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 import io.minio.http.Method;
+import org.jboss.logging.Logger;
 
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.util.UUID;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
 @ApplicationScoped
 public class CloudCreateRoutes extends EndpointRouteBuilder {
+    private static final Logger LOG = Logger.getLogger(CloudCreateRoutes.class);
 
     @Inject
     ObjectMapper objectMapper;
@@ -57,6 +59,20 @@ public class CloudCreateRoutes extends EndpointRouteBuilder {
     String classifierMinioRegion;
 
     private volatile MinioClient classifierMinioClient;
+
+    @ConfigProperty(name = "cloudcatcher.public-minio-endpoint", defaultValue = "http://localhost:9000")
+    String publicMinioEndpoint;
+
+    @ConfigProperty(name = "cloudcatcher.public-minio-access-key", defaultValue = "adminadmin")
+    String publicMinioAccessKey;
+
+    @ConfigProperty(name = "cloudcatcher.public-minio-secret-key", defaultValue = "adminadmin")
+    String publicMinioSecretKey;
+
+    @ConfigProperty(name = "cloudcatcher.public-minio-region", defaultValue = "us-east-1")
+    String publicMinioRegion;
+
+    private volatile MinioClient publicMinioClient;
 
     @Override
     public void configure() {
@@ -87,8 +103,13 @@ public class CloudCreateRoutes extends EndpointRouteBuilder {
                 .to(direct("dispatch-classification-outbox-event"));
 
         from(seda("upload-request"))
-                .setHeader(MinioConstants.OBJECT_NAME, simple("uploads/clouds/${header.userName}/${bean:type:java.util.UUID?method=randomUUID}.${header.fileExtension}"))
-                .to(minio("bucket").autoCreateBucket(true).operation(MinioOperations.createUploadLink))
+                .process(exchange -> {
+                    String userName = exchange.getMessage().getHeader("userName", String.class);
+                    String fileExtension = exchange.getMessage().getHeader("fileExtension", String.class);
+                    String objectName = "uploads/clouds/" + userName + "/" + UUID.randomUUID() + "." + fileExtension;
+                    exchange.getMessage().setHeader(MinioConstants.OBJECT_NAME, objectName);
+                })
+                .process(new CreatePublicUploadLink())
                 .process(exchange -> {
                     String correlationId = exchange.getMessage().getHeader("correlationId", String.class);
                     String payload = exchange.getMessage().getBody(String.class);
@@ -128,7 +149,7 @@ public class CloudCreateRoutes extends EndpointRouteBuilder {
                 .httpMethodRestrict("GET"))
                 .process(RoleCheckProcessor.checkRole("viewer"))
                 .setHeader(MinioConstants.OBJECT_NAME, simple("uploads/clouds/${header.userid}/${header.fileName}"))
-                .to(minio("bucket").operation(MinioOperations.createDownloadLink))
+                .process(new CreatePublicDownloadLink())
                 .setHeader("Location", bodyAs(String.class))
                 .setHeader(Exchange.HTTP_RESPONSE_CODE, constant(307))
                 .setHeader(Exchange.CONTENT_TYPE, constant("text/plain"))
@@ -147,25 +168,14 @@ public class CloudCreateRoutes extends EndpointRouteBuilder {
                                 .to(Populate.message(Populate.header("CamelJpaParameters")), Populate.map("cloudId"))
                 ))
                 .to(jpa(Cloud.class.getCanonicalName()).query("select c from Cloud c where c.id = :cloudId"))
-                .choice()
-                .when(simple("${body.size} == 0"))
-                .setHeader(Exchange.HTTP_RESPONSE_CODE, constant(404))
-                .setHeader(Exchange.CONTENT_TYPE, constant("text/plain"))
-                .setBody(constant("Not found\n"))
-                .stop()
-                .end()
-                .setBody(simple("${body[0]}"))
-                .setProperty("cloudcatcher.minioObjectName", simple("${body.minioObjectName}"))
+                .process(new GuardCloudFoundById())
+                .process(new SelectFirstCloudFromJpaResult())
+                .process(new CaptureMinioObjectName())
                 .setHeader(MinioConstants.OBJECT_NAME, exchangeProperty("cloudcatcher.minioObjectName"))
                 .to(minio("bucket").operation("getObject"))
                 .convertBodyTo(byte[].class)
                 .setHeader(Exchange.HTTP_RESPONSE_CODE, constant(200))
-                .choice()
-                .when(simple("${exchangeProperty.cloudcatcher.minioObjectName} regex '(?i).*\\\\.png$'"))
-                .setHeader(Exchange.CONTENT_TYPE, constant("image/png"))
-                .otherwise()
-                .setHeader(Exchange.CONTENT_TYPE, constant("image/jpeg"))
-                .end();
+                .process(new SetContentTypeFromObjectName());
 
         from(springRabbitmq("cloud-classifier-exchange")
                 .queues("cloud.minio.events")
@@ -173,12 +183,15 @@ public class CloudCreateRoutes extends EndpointRouteBuilder {
                 .exchangeType("direct")
                 .autoDeclare(true))
                 .process(new ParseMinioEvent())
-                .log("minio event received: name=${exchangeProperty.cloudcatcher.minioEventName} key=${exchangeProperty.cloudcatcher.minioObjectName}")
+                .process(exchange -> LOG.infof(
+                        "minio event received: name=%s key=%s",
+                        exchange.getProperty("cloudcatcher.minioEventName", String.class),
+                        exchange.getProperty("cloudcatcher.minioObjectName", String.class)))
                 .filter(exchangeProperty("cloudcatcher.minioObjectName").isNotNull())
                 .choice()
-                .when(simple("${exchangeProperty.cloudcatcher.minioEventName} startsWith 's3:ObjectCreated:'"))
+                .when(exchangeProperty("cloudcatcher.minioEventName").startsWith("s3:ObjectCreated:"))
                 .to(direct("handle-minio-object-created"))
-                .when(simple("${exchangeProperty.cloudcatcher.minioEventName} startsWith 's3:ObjectRemoved:'"))
+                .when(exchangeProperty("cloudcatcher.minioEventName").startsWith("s3:ObjectRemoved:"))
                 .to(direct("handle-minio-object-removed"))
                 .end()
                 .end();
@@ -207,6 +220,40 @@ public class CloudCreateRoutes extends EndpointRouteBuilder {
                 .setExchangePattern(org.apache.camel.ExchangePattern.InOnly)
                 .to(springRabbitmq("cloud-classifier-exchange").routingKey("cloud.general.classifier.request"))
                 .end();
+    }
+
+    private class CreatePublicUploadLink implements Processor {
+        @Override
+        public void process(Exchange exchange) throws Exception {
+            String objectName = exchange.getMessage().getHeader(MinioConstants.OBJECT_NAME, String.class);
+            String uploadUrl = publicMinioClient().getPresignedObjectUrl(
+                    GetPresignedObjectUrlArgs.builder()
+                            .method(Method.PUT)
+                            .bucket("bucket")
+                            .object(objectName)
+                            .region(publicMinioRegion)
+                            .expiry(60 * 60)
+                            .build()
+            );
+            exchange.getMessage().setBody(uploadUrl);
+        }
+    }
+
+    private class CreatePublicDownloadLink implements Processor {
+        @Override
+        public void process(Exchange exchange) throws Exception {
+            String objectName = exchange.getMessage().getHeader(MinioConstants.OBJECT_NAME, String.class);
+            String downloadUrl = publicMinioClient().getPresignedObjectUrl(
+                    GetPresignedObjectUrlArgs.builder()
+                            .method(Method.GET)
+                            .bucket("bucket")
+                            .object(objectName)
+                            .region(publicMinioRegion)
+                            .expiry(60 * 60)
+                            .build()
+            );
+            exchange.getMessage().setBody(downloadUrl);
+        }
     }
 
     private class ParseMinioEvent implements Processor {
@@ -288,6 +335,53 @@ public class CloudCreateRoutes extends EndpointRouteBuilder {
 
             exchange.setProperty("cloudcatcher.newCloudEntity", isNewCloud);
             exchange.getMessage().setBody(cloud);
+        }
+    }
+
+    private static class GuardCloudFoundById implements Processor {
+        @Override
+        public void process(Exchange exchange) {
+            List<Cloud> clouds = exchange.getMessage().getBody(List.class);
+            if (clouds == null || clouds.isEmpty()) {
+                exchange.getMessage().setHeader(Exchange.HTTP_RESPONSE_CODE, 404);
+                exchange.getMessage().setHeader(Exchange.CONTENT_TYPE, "text/plain");
+                exchange.getMessage().setBody("Not found\n");
+                exchange.setRouteStop(true);
+            }
+        }
+    }
+
+    private static class SelectFirstCloudFromJpaResult implements Processor {
+        @Override
+        public void process(Exchange exchange) {
+            List<Cloud> clouds = exchange.getMessage().getBody(List.class);
+            if (clouds == null || clouds.isEmpty()) {
+                return;
+            }
+            exchange.getMessage().setBody(clouds.get(0));
+        }
+    }
+
+    private static class CaptureMinioObjectName implements Processor {
+        @Override
+        public void process(Exchange exchange) {
+            Cloud cloud = exchange.getMessage().getBody(Cloud.class);
+            if (cloud == null) {
+                return;
+            }
+            exchange.setProperty("cloudcatcher.minioObjectName", cloud.getMinioObjectName());
+        }
+    }
+
+    private static class SetContentTypeFromObjectName implements Processor {
+        @Override
+        public void process(Exchange exchange) {
+            String objectName = exchange.getProperty("cloudcatcher.minioObjectName", String.class);
+            String contentType = "image/jpeg";
+            if (objectName != null && objectName.toLowerCase().endsWith(".png")) {
+                contentType = "image/png";
+            }
+            exchange.getMessage().setHeader(Exchange.CONTENT_TYPE, contentType);
         }
     }
 
@@ -426,6 +520,22 @@ public class CloudCreateRoutes extends EndpointRouteBuilder {
                         .build();
             }
             return classifierMinioClient;
+        }
+    }
+
+    private MinioClient publicMinioClient() {
+        MinioClient existing = publicMinioClient;
+        if (existing != null) {
+            return existing;
+        }
+        synchronized (this) {
+            if (publicMinioClient == null) {
+                publicMinioClient = MinioClient.builder()
+                        .endpoint(publicMinioEndpoint)
+                        .credentials(publicMinioAccessKey, publicMinioSecretKey)
+                        .build();
+            }
+            return publicMinioClient;
         }
     }
 }
