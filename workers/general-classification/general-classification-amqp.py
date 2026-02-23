@@ -13,15 +13,19 @@ from general_classifier_service import GeneralClassifierService
 RABBITMQ_URL = os.getenv("RABBITMQ_URL", "amqp://guest:guest@localhost:5672/%2F")
 EXCHANGE = os.getenv("RABBITMQ_EXCHANGE", "cloud-classifier-exchange")
 REQUEST_QUEUE = os.getenv("RABBITMQ_REQUEST_QUEUE", "cloud.general.classifier.request")
-RESULT_QUEUE = os.getenv("RABBITMQ_RESULT_QUEUE", "cloud.general.classifier.results")
-REQUEST_ROUTING_KEY = os.getenv("RABBITMQ_REQUEST_ROUTING_KEY", REQUEST_QUEUE)
-RESULT_ROUTING_KEY = os.getenv("RABBITMQ_RESULT_ROUTING_KEY", "cloud.general.classifier.results")
+REQUEST_ROUTING_KEY = os.getenv("RABBITMQ_REQUEST_ROUTING_KEY", "classification.quota.reserved.v1")
+AUTHORIZED_QUEUE = os.getenv("RABBITMQ_AUTHORIZED_QUEUE", "cloud.general.classifier.results")
+AUTHORIZED_ROUTING_KEY = os.getenv("RABBITMQ_AUTHORIZED_ROUTING_KEY", "classification.general.authorized.v1")
+DENIED_QUEUE = os.getenv("RABBITMQ_DENIED_QUEUE", "cloud.general.classifier.denied")
+DENIED_ROUTING_KEY = os.getenv("RABBITMQ_DENIED_ROUTING_KEY", "classification.general.denied.v1")
 INVALID_ROUTING_KEY = os.getenv("RABBITMQ_INVALID_ROUTING_KEY", "cloud.general.classifier.invalid")
 INVALID_QUEUE = os.getenv("RABBITMQ_INVALID_QUEUE", INVALID_ROUTING_KEY)
-RESULT_DOCUMENT_TYPE = os.getenv("RESULT_DOCUMENT_TYPE", "ObjectClassified")
+AUTHORIZED_DOCUMENT_TYPE = os.getenv("AUTHORIZED_DOCUMENT_TYPE", "GeneralClassificationAuthorizedV1")
+DENIED_DOCUMENT_TYPE = os.getenv("DENIED_DOCUMENT_TYPE", "GeneralClassificationDeniedV1")
 INVALID_DOCUMENT_TYPE = os.getenv("INVALID_DOCUMENT_TYPE", "InvalidClassificationRequest")
 CONNECT_RETRY_BASE_SECONDS = float(os.getenv("RABBITMQ_RETRY_BASE_SECONDS", "1.0"))
 CONNECT_RETRY_MAX_SECONDS = float(os.getenv("RABBITMQ_RETRY_MAX_SECONDS", "30.0"))
+GENERAL_CLASSIFICATION_THRESHOLD = float(os.getenv("GENERAL_CLASSIFICATION_THRESHOLD", "0.5"))
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO").upper(),
@@ -46,6 +50,16 @@ def normalize_image_url(image_url: str) -> str:
     parsed = urlparse(image_url)
     query_items = [(k, v) for (k, v) in parse_qsl(parsed.query, keep_blank_values=True) if k != "token"]
     return urlunparse(parsed._replace(query=urlencode(query_items)))
+
+
+def score_at_or_above(predictions: list[dict], threshold: float) -> bool:
+    for item in predictions:
+        try:
+            if float(item.get("score", 0.0)) >= threshold:
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
 
 
 def publish_invalid_document(
@@ -101,21 +115,46 @@ def handle_request_document(channel: pika.adapters.blocking_connection.BlockingC
     prediction = service.predict_image_bytes(image_bytes, content_type=image_content_type)
     best = prediction.get("classification") or {}
 
+    classification = {
+        "label": best.get("label", "unknown"),
+        "score": best.get("score", 0.0),
+    }
+    predictions = prediction.get("predictions", [])
+    detections = prediction.get("detections", [])
+    blocked = float(classification.get("score", 0.0) or 0.0) >= GENERAL_CLASSIFICATION_THRESHOLD or score_at_or_above(predictions, GENERAL_CLASSIFICATION_THRESHOLD) or score_at_or_above(
+        detections, GENERAL_CLASSIFICATION_THRESHOLD
+    )
+    routing_key = DENIED_ROUTING_KEY if blocked else AUTHORIZED_ROUTING_KEY
+    document_type = DENIED_DOCUMENT_TYPE if blocked else AUTHORIZED_DOCUMENT_TYPE
+
     result_document = {
-        "documentType": RESULT_DOCUMENT_TYPE,
+        "documentType": document_type,
         "cloudId": cloud_id,
+        "requestId": document.get("requestId"),
+        "userName": document.get("userName"),
+        "minioObjectName": document.get("minioObjectName"),
+        "imageUrl": document.get("imageUrl"),
+        "classification": classification,
         "cloudName": best.get("label", "unknown"),
         "score": best.get("score", 0.0),
-        "predictions": prediction.get("predictions", []),
-        "detections": prediction.get("detections", []),
+        "predictions": predictions,
+        "detections": detections,
+        "occurredAt": document.get("occurredAt"),
     }
     channel.basic_publish(
         exchange=EXCHANGE,
-        routing_key=RESULT_ROUTING_KEY,
+        routing_key=routing_key,
         body=json.dumps(result_document).encode("utf-8"),
         properties=pika.BasicProperties(content_type="application/json", delivery_mode=2),
     )
-    LOGGER.info("Result sent cloudId=%s cloudName=%s", cloud_id, result_document["cloudName"])
+    LOGGER.info(
+        "Result sent cloudId=%s routingKey=%s cloudName=%s blocked=%s threshold=%.3f",
+        cloud_id,
+        routing_key,
+        result_document["cloudName"],
+        blocked,
+        GENERAL_CLASSIFICATION_THRESHOLD,
+    )
 
 
 def main() -> None:
@@ -124,11 +163,12 @@ def main() -> None:
     parameters = pika.URLParameters(RABBITMQ_URL)
     connect_attempt = 0
     LOGGER.info(
-        "Starting worker with RabbitMQ URL=%s exchange=%s requestQueue=%s resultQueue=%s",
+        "Starting worker with RabbitMQ URL=%s exchange=%s requestQueue=%s authorizedQueue=%s deniedQueue=%s",
         RABBITMQ_URL,
         EXCHANGE,
         REQUEST_QUEUE,
-        RESULT_QUEUE,
+        AUTHORIZED_QUEUE,
+        DENIED_QUEUE,
     )
     while True:
         try:
@@ -139,10 +179,12 @@ def main() -> None:
 
             channel.exchange_declare(exchange=EXCHANGE, exchange_type="direct", durable=True)
             channel.queue_declare(queue=REQUEST_QUEUE, durable=False)
-            channel.queue_declare(queue=RESULT_QUEUE, durable=False)
+            channel.queue_declare(queue=AUTHORIZED_QUEUE, durable=False)
+            channel.queue_declare(queue=DENIED_QUEUE, durable=False)
             channel.queue_declare(queue=INVALID_QUEUE, durable=False)
             channel.queue_bind(queue=REQUEST_QUEUE, exchange=EXCHANGE, routing_key=REQUEST_ROUTING_KEY)
-            channel.queue_bind(queue=RESULT_QUEUE, exchange=EXCHANGE, routing_key=RESULT_ROUTING_KEY)
+            channel.queue_bind(queue=AUTHORIZED_QUEUE, exchange=EXCHANGE, routing_key=AUTHORIZED_ROUTING_KEY)
+            channel.queue_bind(queue=DENIED_QUEUE, exchange=EXCHANGE, routing_key=DENIED_ROUTING_KEY)
             channel.queue_bind(queue=INVALID_QUEUE, exchange=EXCHANGE, routing_key=INVALID_ROUTING_KEY)
             channel.basic_qos(prefetch_count=1)
 

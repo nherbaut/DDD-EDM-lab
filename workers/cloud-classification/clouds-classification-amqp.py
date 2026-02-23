@@ -13,10 +13,10 @@ from cloud_classifier_service import CloudClassifierService
 
 RABBITMQ_URL = os.getenv("RABBITMQ_URL", "amqp://guest:guest@localhost:5672/%2F")
 EXCHANGE = os.getenv("RABBITMQ_EXCHANGE", "cloud-classifier-exchange")
-REQUEST_QUEUE = os.getenv("RABBITMQ_REQUEST_QUEUE", "cloud.cloud-classifier.request")
-REQUEST_ROUTING_KEY = os.getenv("RABBITMQ_REQUEST_ROUTING_KEY", "cloud.cloud-classifier.request")
-RESULT_QUEUE = os.getenv("RABBITMQ_RESULT_QUEUE", "cloud.cloud-classifier.results")
-RESULT_ROUTING_KEY = os.getenv("RABBITMQ_RESULT_ROUTING_KEY", "cloud.cloud-classifier.results")
+REQUEST_QUEUE = os.getenv("RABBITMQ_REQUEST_QUEUE", "cloud.general.classifier.results")
+REQUEST_ROUTING_KEY = os.getenv("RABBITMQ_REQUEST_ROUTING_KEY", "classification.general.authorized.v1")
+RESULT_QUEUE = os.getenv("RABBITMQ_RESULT_QUEUE", "cloud.cloud-classifier.completed")
+RESULT_ROUTING_KEY = os.getenv("RABBITMQ_RESULT_ROUTING_KEY", "classification.cloud.completed.v1")
 INVALID_ROUTING_KEY = os.getenv("RABBITMQ_INVALID_ROUTING_KEY", "cloud.cloud-classifier.invalid")
 INVALID_QUEUE = os.getenv("RABBITMQ_INVALID_QUEUE", INVALID_ROUTING_KEY)
 INVALID_DOCUMENT_TYPE = os.getenv("INVALID_DOCUMENT_TYPE", "InvalidClassificationRequest")
@@ -76,10 +76,43 @@ def publish_invalid_document(
     )
 
 
+def extract_image_url(document: dict) -> str | None:
+    image_url = document.get("imageUrl")
+    if isinstance(image_url, str) and image_url.strip():
+        return image_url
+    original = document.get("original")
+    if isinstance(original, dict):
+        original_image_url = original.get("imageUrl")
+        if isinstance(original_image_url, str) and original_image_url.strip():
+            return original_image_url
+    return None
+
+
 def handle_request_document(channel: pika.adapters.blocking_connection.BlockingChannel, body: bytes) -> None:
     document = json.loads(body.decode("utf-8"))
-    cloud_id = int(document["cloudId"])
-    image_url = normalize_image_url(document["imageUrl"])
+    cloud_id_raw = document.get("cloudId")
+    try:
+        cloud_id = int(cloud_id_raw)
+    except (TypeError, ValueError) as exc:
+        publish_invalid_document(
+            channel=channel,
+            original_document=document,
+            reason="INVALID_CLOUD_ID",
+            details=f"cloudId is missing or invalid: {cloud_id_raw}",
+        )
+        raise NonRetryableMessageError("Missing or invalid cloudId") from exc
+
+    image_url_raw = extract_image_url(document)
+    if not image_url_raw:
+        publish_invalid_document(
+            channel=channel,
+            original_document=document,
+            reason="MISSING_IMAGE_URL",
+            details="imageUrl is required for cloud classification",
+        )
+        raise NonRetryableMessageError("Missing imageUrl")
+
+    image_url = normalize_image_url(image_url_raw)
     LOGGER.info("Accepted request document cloudId=%s imageUrl=%s", cloud_id, image_url)
 
     LOGGER.info("Downloading cloud image for cloudId=%s", cloud_id)
@@ -112,11 +145,20 @@ def handle_request_document(channel: pika.adapters.blocking_connection.BlockingC
     )
 
     result_document = {
-        "documentType": "CloudClassified",
+        "documentType": "CloudClassificationCompletedV1",
         "cloudId": cloud_id,
+        "requestId": document.get("requestId"),
+        "userName": document.get("userName"),
+        "minioObjectName": document.get("minioObjectName"),
+        "imageUrl": document.get("imageUrl"),
         "cloudName": best.get("label", "unknown"),
         "score": best.get("score", 0.0),
+        "classification": {
+            "label": best.get("label", "unknown"),
+            "score": best.get("score", 0.0),
+        },
         "predictions": prediction.get("predictions", []),
+        "occurredAt": document.get("occurredAt"),
     }
     channel.basic_publish(
         exchange=EXCHANGE,

@@ -1,0 +1,163 @@
+name: ddd-lab
+
+services:
+  postgres:
+    container_name: postgres
+    image: docker.io/library/postgres:17
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: app
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: app
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app -d app"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  keycloak:
+    container_name: keycloak
+    image: quay.io/keycloak/keycloak:26.5.0
+    command: ["start-dev", "--import-realm"]
+    ports:
+      - "8081:8080"
+    environment:
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: admin
+      KC_HOSTNAME: http://localhost:8081
+      KC_HOSTNAME_STRICT: "false"
+    volumes:
+      - ./cloud-catcher/src/main/resources/realm-export.json:/opt/keycloak/data/import/realm-export.json:ro
+    healthcheck:
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/8080"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  rabbitmq:
+    container_name: rabbitmq
+    image: docker.io/library/rabbitmq:3.12-management
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  minio:
+    image: docker.io/minio/minio:RELEASE.2025-04-22T22-12-26Z
+    container_name: minio
+    command: ["server", "/data", "--console-address", ":9001"]
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: adminadmin
+      MINIO_ROOT_PASSWORD: adminadmin
+      MINIO_NOTIFY_AMQP_ENABLE_RABBIT1: "on"
+      MINIO_NOTIFY_AMQP_URL_RABBIT1: amqp://guest:guest@rabbitmq:5672/%2F
+      MINIO_NOTIFY_AMQP_EXCHANGE_RABBIT1: cloud-classifier-exchange
+      MINIO_NOTIFY_AMQP_EXCHANGE_TYPE_RABBIT1: direct
+      MINIO_NOTIFY_AMQP_DURABLE_RABBIT1: "on"
+      MINIO_NOTIFY_AMQP_AUTO_DELETED_RABBIT1: "off"
+      MINIO_NOTIFY_AMQP_ROUTING_KEY_RABBIT1: cloud.minio.event
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+
+  general-classifier-worker:
+    container_name: general-classifier-worker
+    image: ${GENERAL_WORKER_IMAGE:-nherbaut/ddd-worker-classifier-general:latest}
+    command: ["python3", "general-classification-amqp.py"]
+    environment:
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/%2F
+      RABBITMQ_EXCHANGE: cloud-classifier-exchange
+      RABBITMQ_REQUEST_QUEUE: cloud.general.classifier.request
+      RABBITMQ_REQUEST_ROUTING_KEY: classification.quota.reserved.v1
+      RABBITMQ_AUTHORIZED_QUEUE: cloud.general.classifier.results
+      RABBITMQ_AUTHORIZED_ROUTING_KEY: classification.general.authorized.v1
+      RABBITMQ_DENIED_QUEUE: cloud.general.classifier.denied
+      RABBITMQ_DENIED_ROUTING_KEY: classification.general.denied.v1
+      RABBITMQ_INVALID_QUEUE: cloud.general.classifier.invalid
+      RABBITMQ_INVALID_ROUTING_KEY: cloud.general.classifier.invalid
+      GENERAL_CLASSIFICATION_THRESHOLD: "0.5"
+      LOG_LEVEL: INFO
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+
+  cloud-classifier-worker:
+    container_name: cloud-classifier-worker
+    image: ${CLOUD_WORKER_IMAGE:-nherbaut/ddd-worker-classifier-cloud:latest}
+    command: ["python3", "clouds-classification-amqp.py"]
+    environment:
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/%2F
+      RABBITMQ_EXCHANGE: cloud-classifier-exchange
+      RABBITMQ_REQUEST_QUEUE: cloud.general.classifier.results
+      RABBITMQ_REQUEST_ROUTING_KEY: classification.general.authorized.v1
+      RABBITMQ_RESULT_QUEUE: cloud.cloud-classifier.completed
+      RABBITMQ_RESULT_ROUTING_KEY: classification.cloud.completed.v1
+      RABBITMQ_INVALID_QUEUE: cloud.cloud-classifier.invalid
+      RABBITMQ_INVALID_ROUTING_KEY: cloud.cloud-classifier.invalid
+      LOG_LEVEL: INFO
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+
+  cloud-accounting:
+    container_name: cloud-accounting
+    image: ${ACCOUNTING_IMAGE:-nherbaut/cloud-accounting:latest}
+    pull_policy: never
+    environment:
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: "5672"
+      RABBITMQ_USERNAME: guest
+      RABBITMQ_PASSWORD: guest
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+
+  backend:
+    container_name: cloud-catcher-backend
+    image: ${BACKEND_IMAGE:-nherbaut/cloud-catcher:latest}
+    pull_policy: never
+    ports:
+      - "8080:8080"
+    environment:
+      QUARKUS_HTTP_HOST: 0.0.0.0
+      QUARKUS_DATASOURCE_JDBC_URL: jdbc:postgresql://postgres:5432/app
+      QUARKUS_DATASOURCE_USERNAME: app
+      QUARKUS_DATASOURCE_PASSWORD: app
+      CLOUDCATCHER_KEYCLOAK_REALM: cloudcatcher
+      CLOUDCATCHER_KEYCLOAK_PUBLIC_HOST: localhost
+      CLOUDCATCHER_KEYCLOAK_PUBLIC_PORT: "8081"
+      CLOUDCATCHER_KEYCLOAK_INTERNAL_HOST: keycloak
+      CLOUDCATCHER_KEYCLOAK_INTERNAL_PORT: "8080"
+      QUARKUS_MINIO_HOST: minio
+      QUARKUS_MINIO_PORT: "9000"
+      QUARKUS_MINIO_ACCESS_KEY: adminadmin
+      QUARKUS_MINIO_SECRET_KEY: adminadmin
+      QUARKUS_MINIO_SECURE: "false"
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: "5672"
+      RABBITMQ_USERNAME: guest
+      RABBITMQ_PASSWORD: guest
+      CLOUDCATCHER_CLASSIFIER_MINIO_ENDPOINT: http://minio:9000
+      CLOUDCATCHER_CLASSIFIER_MINIO_ACCESS_KEY: adminadmin
+      CLOUDCATCHER_CLASSIFIER_MINIO_SECRET_KEY: adminadmin
+      CLOUDCATCHER_CLASSIFIER_MINIO_REGION: us-east-1
+    depends_on:
+      postgres:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      minio:
+        condition: service_started

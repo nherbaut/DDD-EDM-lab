@@ -37,10 +37,10 @@ run-rest:
 
 run-amqp:
 	PYTHONUNBUFFERED=1 CUDA_VISIBLE_DEVICES="" MODEL_DIR=$(MODEL_DIR) \
-	RABBITMQ_REQUEST_QUEUE=cloud.cloud-classifier.request \
-	RABBITMQ_REQUEST_ROUTING_KEY=cloud.cloud-classifier.request \
-	RABBITMQ_RESULT_QUEUE=cloud.cloud-classifier.results \
-	RABBITMQ_RESULT_ROUTING_KEY=cloud.cloud-classifier.results \
+	RABBITMQ_REQUEST_QUEUE=cloud.general.classifier.results \
+	RABBITMQ_REQUEST_ROUTING_KEY=classification.general.authorized.v1 \
+	RABBITMQ_RESULT_QUEUE=cloud.cloud-classifier.completed \
+	RABBITMQ_RESULT_ROUTING_KEY=classification.cloud.completed.v1 \
 	$(PYTHON) clouds-classification-amqp.py
 
 docker-build-base:
