@@ -15,7 +15,8 @@ COPY workers/cloud-classification/cloud_classifier_service.py /app/cloud_classif
 COPY workers/cloud-classification/clouds-classification-rest.py /app/clouds-classification-rest.py
 COPY workers/cloud-classification/clouds-classification-amqp.py /app/clouds-classification-amqp.py
 COPY workers/cloud-classification/mq_worker.py /app/mq_worker.py
-COPY workers/cloud-classification/models/cloud-classifier/ /app/models/cloud-classifier/
+# Models are not copied from the repo because they are git-ignored local artifacts.
+# The service falls back to MODEL_REPO at runtime when MODEL_DIR does not exist.
 
 EXPOSE 8000
 
