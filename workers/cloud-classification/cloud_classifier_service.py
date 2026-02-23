@@ -1,5 +1,6 @@
 import io
 import json
+import logging
 import os
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,7 @@ MODEL_DIR = os.getenv("MODEL_DIR", "models/cloud-classifier")
 MODEL_REPO = os.getenv("MODEL_REPO", "serbekun/CCAiM")
 DEVICE = int(os.getenv("DEVICE", "-1"))  # -1 = CPU
 TOP_K = int(os.getenv("TOP_K", "3"))
+LOGGER = logging.getLogger("cloud-classifier-service")
 
 DEFAULT_CLASS_LABELS = [
     "Cirroculumulus",
@@ -139,24 +141,44 @@ class CloudClassifierService:
 
         return _transform
 
-    def load(self) -> None:
-        model_ref = MODEL_DIR if os.path.isdir(MODEL_DIR) else MODEL_REPO
-        if os.path.isdir(model_ref):
-            model2_path = Path(model_ref) / "model2.pth"
-            if model2_path.exists():
-                self.model2, self.class_labels = self._load_model2(model_ref)
-                self.model2_transforms = self._build_model2_transforms()
-                return
+    def _download_repo_to_model_dir(self) -> str:
+        from huggingface_hub import snapshot_download
 
-            config_path = Path(model_ref) / "config.json"
-            if config_path.exists():
-                with config_path.open("r", encoding="utf-8") as f:
-                    cfg = json.load(f)
-                if cfg.get("model_type") == "ccaim":
-                    self.ccaim_model, self.class_labels = self._load_ccaim_model(model_ref)
-                    return
+        target_dir = Path(MODEL_DIR)
+        target_dir.mkdir(parents=True, exist_ok=True)
+        snapshot_download(repo_id=MODEL_REPO, local_dir=str(target_dir))
+        return str(target_dir)
+
+    def _try_load_local_models(self, model_dir: str) -> bool:
+        model2_path = Path(model_dir) / "model2.pth"
+        if model2_path.exists():
+            self.model2, self.class_labels = self._load_model2(model_dir)
+            self.model2_transforms = self._build_model2_transforms()
+            return True
+
+        config_path = Path(model_dir) / "config.json"
+        if config_path.exists():
+            with config_path.open("r", encoding="utf-8") as f:
+                cfg = json.load(f)
+            if cfg.get("model_type") == "ccaim":
+                self.ccaim_model, self.class_labels = self._load_ccaim_model(model_dir)
+                return True
+        return False
+
+    def load(self) -> None:
+        if self._try_load_local_models(MODEL_DIR):
+            return
+
+        try:
+            downloaded_dir = self._download_repo_to_model_dir()
+            if self._try_load_local_models(downloaded_dir):
+                return
+        except Exception as exc:
+            LOGGER.warning("Could not download model repo %s into %s: %s", MODEL_REPO, MODEL_DIR, exc)
+
         from transformers import pipeline
 
+        model_ref = MODEL_DIR if os.path.isdir(MODEL_DIR) else MODEL_REPO
         self.classifier = pipeline("image-classification", model=model_ref, device=DEVICE, trust_remote_code=True)
 
     def health(self) -> dict[str, Any]:

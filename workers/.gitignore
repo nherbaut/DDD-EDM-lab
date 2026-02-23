@@ -30,6 +30,15 @@ models/
 *.onnx
 *.safetensors
 
+# Keep only the cloud-classification reference models in git (LFS-managed).
+!cloud-classification/models/
+!cloud-classification/models/cloud-classifier/
+!cloud-classification/models/cloud-classifier/config.json
+!cloud-classification/models/cloud-classifier/README.md
+!cloud-classification/models/cloud-classifier/model2.pth
+!cloud-classification/models/cloud-classifier/CCAiM_V0_0_4.pth
+!cloud-classification/models/cloud-classifier/.gitattributes
+
 # IDE/editor
 .idea/
 .vscode/
