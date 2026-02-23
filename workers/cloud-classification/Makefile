@@ -1,5 +1,5 @@
 PYTHON ?= python3
-MODEL_REPO ?= serbekun/CCAiM
+MODEL_REPO ?=
 MODEL_DIR ?= models/cloud-classifier
 PORT ?= 8000
 IMAGE ?= cloud-classification:latest
@@ -10,7 +10,7 @@ BASE_IMAGE ?= workers-python-base:latest
 help:
 	@echo "Targets:"
 	@echo "  make install         Install shared runtime deps + project deps"
-	@echo "  make download-model  Download HF model into $(MODEL_DIR)"
+	@echo "  make download-model  Download model into $(MODEL_DIR) (requires MODEL_REPO=<hf-repo-id>)"
 	@echo "  make run             Alias of make run-rest"
 	@echo "  make run-rest        Run REST API locally on port $(PORT)"
 	@echo "  make run-worker      Alias of make run-amqp"

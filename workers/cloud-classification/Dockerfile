@@ -2,7 +2,7 @@ ARG BASE_IMAGE=workers-python-base:latest
 FROM ${BASE_IMAGE}
 
 ENV MODEL_DIR=/app/models/cloud-classifier
-ENV MODEL_REPO=serbekun/CCAiM
+ENV MODEL_REPO=
 ENV DEVICE=-1
 ENV TOP_K=3
 
