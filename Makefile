@@ -12,12 +12,17 @@ BACKEND_IMAGE_GROUP ?= nherbaut
 BACKEND_IMAGE_NAME ?= cloud-catcher
 BACKEND_IMAGE_TAG ?= latest
 BACKEND_IMAGE_REF := $(BACKEND_IMAGE_GROUP)/$(BACKEND_IMAGE_NAME):$(BACKEND_IMAGE_TAG)
+ARCH ?= $(shell uname -m | sed -e 's/x86_64/amd64/' -e 's/aarch64/arm64/')
+ARCH_TAG := $(BACKEND_IMAGE_TAG)-$(ARCH)
+ACCOUNTING_ARCH_IMAGE_REF := $(ACCOUNTING_IMAGE_GROUP)/$(ACCOUNTING_IMAGE_NAME):$(ARCH_TAG)
 COMPOSE ?= docker compose
 COMPOSE_FILE ?= docker-compose.yml
 
 .PHONY: help \
 	build-cloud-catcher build-cloud-accounting build-workers build-all \
 	push-cloud-catcher push-cloud-accounting push-workers push-all \
+	push-cloud-catcher-arch push-cloud-accounting-arch push-workers-arch push-all-arch \
+	manifest-backend-latest manifest-cloud-accounting-latest manifest-workers-latest manifest-latest \
 	up upup down pull logs ps
 
 help:
@@ -30,6 +35,8 @@ help:
 	@echo "  make push-cloud-accounting  Push cloud-accounting image ($(ACCOUNTING_IMAGE_REF))"
 	@echo "  make build-workers        Build both workers images"
 	@echo "  make push-workers         Push both workers images"
+	@echo "  make push-all-arch ARCH=amd64|arm64  Push arch-tagged images for backend + accounting + workers"
+	@echo "  make manifest-latest      Publish multi-arch :latest manifests (after amd64+arm64 pushes)"
 	@echo "  make up                   Start full stack from root compose (includes cloud-accounting)"
 	@echo "  make down                 Stop root compose stack"
 	@echo "  make pull                 Pull images referenced by root compose stack"
@@ -60,6 +67,42 @@ push-workers:
 build-all: build-cloud-catcher build-cloud-accounting build-workers
 
 push-all: push-cloud-catcher push-cloud-accounting push-workers
+
+push-cloud-catcher-arch:
+	$(MAKE) -C $(CLOUD_CATCHER_DIR) \
+		ARCH=$(ARCH) \
+		BACKEND_IMAGE_GROUP=$(BACKEND_IMAGE_GROUP) \
+		BACKEND_IMAGE_NAME=$(BACKEND_IMAGE_NAME) \
+		BACKEND_IMAGE_TAG=$(BACKEND_IMAGE_TAG) \
+		push-backend-arch
+
+push-workers-arch:
+	$(MAKE) -C $(CLOUD_CATCHER_DIR) ARCH=$(ARCH) push-workers-arch
+
+push-cloud-accounting-arch: build-cloud-accounting
+	docker tag $(ACCOUNTING_IMAGE_REF) $(ACCOUNTING_ARCH_IMAGE_REF)
+	docker push $(ACCOUNTING_ARCH_IMAGE_REF)
+
+push-all-arch: push-cloud-catcher-arch push-cloud-accounting-arch push-workers-arch
+
+manifest-backend-latest:
+	$(MAKE) -C $(CLOUD_CATCHER_DIR) \
+		BACKEND_IMAGE_GROUP=$(BACKEND_IMAGE_GROUP) \
+		BACKEND_IMAGE_NAME=$(BACKEND_IMAGE_NAME) \
+		BACKEND_IMAGE_TAG=$(BACKEND_IMAGE_TAG) \
+		manifest-backend-latest
+
+manifest-workers-latest:
+	$(MAKE) -C $(CLOUD_CATCHER_DIR) manifest-workers-latest
+
+manifest-cloud-accounting-latest:
+	-docker manifest rm $(ACCOUNTING_IMAGE_REF)
+	docker manifest create $(ACCOUNTING_IMAGE_REF) \
+		$(ACCOUNTING_IMAGE_GROUP)/$(ACCOUNTING_IMAGE_NAME):$(ACCOUNTING_IMAGE_TAG)-amd64 \
+		$(ACCOUNTING_IMAGE_GROUP)/$(ACCOUNTING_IMAGE_NAME):$(ACCOUNTING_IMAGE_TAG)-arm64
+	docker manifest push $(ACCOUNTING_IMAGE_REF)
+
+manifest-latest: manifest-backend-latest manifest-cloud-accounting-latest manifest-workers-latest
 
 up: build-cloud-catcher build-cloud-accounting
 	BACKEND_IMAGE=$(BACKEND_IMAGE_REF) ACCOUNTING_IMAGE=$(ACCOUNTING_IMAGE_REF) $(COMPOSE) -f $(COMPOSE_FILE) up -d --remove-orphans
