@@ -10,6 +10,7 @@ WORKDIR /app
 
 COPY workers/cloud-classification/requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
+RUN python3 -c "import transformers, safetensors; print('cloud worker deps ok')"
 
 COPY workers/cloud-classification/cloud_classifier_service.py /app/cloud_classifier_service.py
 COPY workers/cloud-classification/clouds-classification-rest.py /app/clouds-classification-rest.py
