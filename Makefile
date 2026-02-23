@@ -86,21 +86,26 @@ push-cloud-accounting-arch: build-cloud-accounting
 push-all-arch: push-cloud-catcher-arch push-cloud-accounting-arch push-workers-arch
 
 manifest-backend-latest:
-	$(MAKE) -C $(CLOUD_CATCHER_DIR) \
-		BACKEND_IMAGE_GROUP=$(BACKEND_IMAGE_GROUP) \
-		BACKEND_IMAGE_NAME=$(BACKEND_IMAGE_NAME) \
-		BACKEND_IMAGE_TAG=$(BACKEND_IMAGE_TAG) \
-		manifest-backend-latest
+	docker buildx imagetools create \
+		-t $(BACKEND_IMAGE_REF) \
+		$(BACKEND_IMAGE_GROUP)/$(BACKEND_IMAGE_NAME):$(BACKEND_IMAGE_TAG)-amd64 \
+		$(BACKEND_IMAGE_GROUP)/$(BACKEND_IMAGE_NAME):$(BACKEND_IMAGE_TAG)-arm64
 
 manifest-workers-latest:
-	$(MAKE) -C $(CLOUD_CATCHER_DIR) manifest-workers-latest
+	docker buildx imagetools create \
+		-t nherbaut/ddd-worker-classifier-cloud:latest \
+		nherbaut/ddd-worker-classifier-cloud:latest-amd64 \
+		nherbaut/ddd-worker-classifier-cloud:latest-arm64
+	docker buildx imagetools create \
+		-t nherbaut/ddd-worker-classifier-general:latest \
+		nherbaut/ddd-worker-classifier-general:latest-amd64 \
+		nherbaut/ddd-worker-classifier-general:latest-arm64
 
 manifest-cloud-accounting-latest:
-	-docker manifest rm $(ACCOUNTING_IMAGE_REF)
-	docker manifest create $(ACCOUNTING_IMAGE_REF) \
+	docker buildx imagetools create \
+		-t $(ACCOUNTING_IMAGE_REF) \
 		$(ACCOUNTING_IMAGE_GROUP)/$(ACCOUNTING_IMAGE_NAME):$(ACCOUNTING_IMAGE_TAG)-amd64 \
 		$(ACCOUNTING_IMAGE_GROUP)/$(ACCOUNTING_IMAGE_NAME):$(ACCOUNTING_IMAGE_TAG)-arm64
-	docker manifest push $(ACCOUNTING_IMAGE_REF)
 
 manifest-latest: manifest-backend-latest manifest-cloud-accounting-latest manifest-workers-latest
 
