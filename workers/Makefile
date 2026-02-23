@@ -6,7 +6,7 @@ GENERAL_IMAGE ?= general-classification:latest
 CLOUD_REMOTE ?= nherbaut/ddd-worker-classifier-cloud:latest
 GENERAL_REMOTE ?= nherbaut/ddd-worker-classifier-general:latest
 
-.PHONY: help build-base build-cloud build-general build-all tag-cloud tag-general tag-all push-cloud push-general push-all
+.PHONY: help build-base build-cloud build-general build-all tag-cloud tag-general tag-all push-cloud push-general push-all clean
 
 help:
 	@echo "Targets:"
@@ -20,6 +20,7 @@ help:
 	@echo "  make push-cloud     Push cloud image to Docker Hub"
 	@echo "  make push-general   Push general image to Docker Hub"
 	@echo "  make push-all       Push both images to Docker Hub"
+	@echo "  make clean          Remove local worker images and Python caches"
 
 build-base:
 	docker build -f Dockerfile.base -t $(BASE_IMAGE) ..
@@ -47,3 +48,7 @@ push-general: tag-general
 	docker push $(GENERAL_REMOTE)
 
 push-all: push-cloud push-general
+
+clean:
+	docker image rm -f $(CLOUD_IMAGE) $(GENERAL_IMAGE) $(BASE_IMAGE) || true
+	find . -type d -name "__pycache__" -prune -exec rm -rf {} +
