@@ -13,6 +13,8 @@ import org.springframework.amqp.core.Queue;
 import org.springframework.amqp.rabbit.connection.ConnectionFactory;
 import org.springframework.amqp.rabbit.core.RabbitAdmin;
 
+import java.util.Map;
+
 @ApplicationScoped
 public class CamelRoutes extends EndpointRouteBuilder {
 
@@ -48,6 +50,7 @@ public class CamelRoutes extends EndpointRouteBuilder {
             Queue cloudAccountingQuotaRequestQueue = new Queue("cloud.accounting.quota.request.events", false);
             Queue generalInvalidQueue = new Queue("cloud.general.classifier.invalid", false);
             Queue cloudInvalidQueue = new Queue("cloud.cloud-classifier.invalid", false);
+            Queue auditQueue = new Queue("cloud.audit.events", false, false, false, Map.of("x-message-ttl", 14_400_000));
             Queue eventQueue = new Queue("cloud.minio.events", false);
             Queue deleteRequestQueue = new Queue("cloud.delete.requests", false);
             Queue userCreatedQueue = new Queue("cloud.user.created.events", false);
@@ -66,6 +69,20 @@ public class CamelRoutes extends EndpointRouteBuilder {
             Binding cloudAccountingQuotaRequestBinding = BindingBuilder.bind(cloudAccountingQuotaRequestQueue).to(exchangeDef).with("accounting.quota.request.v1");
             Binding generalInvalidBinding = BindingBuilder.bind(generalInvalidQueue).to(exchangeDef).with("cloud.general.classifier.invalid");
             Binding cloudInvalidBinding = BindingBuilder.bind(cloudInvalidQueue).to(exchangeDef).with("cloud.cloud-classifier.invalid");
+            Binding auditRequestBinding = BindingBuilder.bind(auditQueue).to(exchangeDef).with("cloud.cloud-classifier.request");
+            Binding auditResultBinding = BindingBuilder.bind(auditQueue).to(exchangeDef).with("cloud.cloud-classifier.results");
+            Binding auditGeneralRequestBinding = BindingBuilder.bind(auditQueue).to(exchangeDef).with("classification.quota.reserved.v1");
+            Binding auditGeneralResultBinding = BindingBuilder.bind(auditQueue).to(exchangeDef).with("classification.general.authorized.v1");
+            Binding auditGeneralDeniedBinding = BindingBuilder.bind(auditQueue).to(exchangeDef).with("classification.general.denied.v1");
+            Binding auditCloudCompletedBinding = BindingBuilder.bind(auditQueue).to(exchangeDef).with("classification.cloud.completed.v1");
+            Binding auditQuotaUpdatedBinding = BindingBuilder.bind(auditQueue).to(exchangeDef).with("accounting.quota.updated.v1");
+            Binding auditUserCreatedBinding = BindingBuilder.bind(auditQueue).to(exchangeDef).with("admin.user.new");
+            Binding auditAccountingGeneralRequestBinding = BindingBuilder.bind(auditQueue).to(exchangeDef).with("cloud.general.classifier.request");
+            Binding auditAccountingQuotaRequestBinding = BindingBuilder.bind(auditQueue).to(exchangeDef).with("accounting.quota.request.v1");
+            Binding auditGeneralInvalidBinding = BindingBuilder.bind(auditQueue).to(exchangeDef).with("cloud.general.classifier.invalid");
+            Binding auditCloudInvalidBinding = BindingBuilder.bind(auditQueue).to(exchangeDef).with("cloud.cloud-classifier.invalid");
+            Binding auditEventBinding = BindingBuilder.bind(auditQueue).to(exchangeDef).with("cloud.minio.event");
+            Binding auditDeleteRequestBinding = BindingBuilder.bind(auditQueue).to(exchangeDef).with("cloud.delete.request");
             Binding eventBinding = BindingBuilder.bind(eventQueue).to(exchangeDef).with("cloud.minio.event");
             Binding deleteRequestBinding = BindingBuilder.bind(deleteRequestQueue).to(exchangeDef).with("cloud.delete.request");
             Binding userCreatedBinding = BindingBuilder.bind(userCreatedQueue).to(exchangeDef).with("admin.user.new");
@@ -86,6 +103,7 @@ public class CamelRoutes extends EndpointRouteBuilder {
             admin.declareQueue(cloudAccountingQuotaRequestQueue);
             admin.declareQueue(generalInvalidQueue);
             admin.declareQueue(cloudInvalidQueue);
+            admin.declareQueue(auditQueue);
             admin.declareQueue(eventQueue);
             admin.declareQueue(deleteRequestQueue);
             admin.declareQueue(userCreatedQueue);
@@ -104,6 +122,20 @@ public class CamelRoutes extends EndpointRouteBuilder {
             admin.declareBinding(cloudAccountingQuotaRequestBinding);
             admin.declareBinding(generalInvalidBinding);
             admin.declareBinding(cloudInvalidBinding);
+            admin.declareBinding(auditRequestBinding);
+            admin.declareBinding(auditResultBinding);
+            admin.declareBinding(auditGeneralRequestBinding);
+            admin.declareBinding(auditGeneralResultBinding);
+            admin.declareBinding(auditGeneralDeniedBinding);
+            admin.declareBinding(auditCloudCompletedBinding);
+            admin.declareBinding(auditQuotaUpdatedBinding);
+            admin.declareBinding(auditUserCreatedBinding);
+            admin.declareBinding(auditAccountingGeneralRequestBinding);
+            admin.declareBinding(auditAccountingQuotaRequestBinding);
+            admin.declareBinding(auditGeneralInvalidBinding);
+            admin.declareBinding(auditCloudInvalidBinding);
+            admin.declareBinding(auditEventBinding);
+            admin.declareBinding(auditDeleteRequestBinding);
             admin.declareBinding(eventBinding);
             admin.declareBinding(deleteRequestBinding);
             admin.declareBinding(userCreatedBinding);

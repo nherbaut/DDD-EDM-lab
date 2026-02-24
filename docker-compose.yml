@@ -96,7 +96,10 @@ services:
     container_name: cloud-classifier-worker
     image: ${CLOUD_WORKER_IMAGE:-nherbaut/ddd-worker-classifier-cloud:latest}
     command: ["python3", "clouds-classification-amqp.py"]
+    volumes:
+      - ./workers/cloud-classification/models/cloud-classifier:/app/models/cloud-classifier:ro
     environment:
+      MODEL_REPO: ""
       RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/%2F
       RABBITMQ_EXCHANGE: cloud-classifier-exchange
       RABBITMQ_REQUEST_QUEUE: cloud.general.classifier.results
